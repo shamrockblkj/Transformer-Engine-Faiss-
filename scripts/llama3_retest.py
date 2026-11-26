@@ -46,6 +46,7 @@ class Accum:
         self.S, self.m = zeros((d, d)), zeros((d,))
         self.n, self.snaps = 0, sorted({int(t) for t in snap_tokens})
         self.out, self.first_idx, self.first_vec, self.to_np = {}, [], [], to_np
+        self.spikes = []
 
     @property
     def done(self):
@@ -71,7 +72,84 @@ class Accum:
              f"{prefix}_first_vec": np.array(self.first_vec)}
         for t, (S, m) in self.out.items():
             d[f"{prefix}_S_{t}"], d[f"{prefix}_m_{t}"] = S, m
+        d[f"{prefix}_spikes"] = np.array(self.spikes, dtype=SPIKE_DTYPE) if self.spikes else np.zeros(0, dtype=SPIKE_DTYPE)
         return d
+
+
+SPIKE_DTYPE = np.dtype([
+    ("seq", np.int32), ("pos", np.int32), ("token", np.int32),
+    ("resid", np.float64), ("peak", np.float64),
+])
+
+
+def top_spike_rows(resid, peak, token_ids, seq, topk):
+    """resid 是残差流 token RMS / 序列中位数。peak 是投影输入上的 max|x|/rms。"""
+    n = min(len(resid), len(peak), len(token_ids))
+    if n == 0:
+        return []
+    k = min(int(topk), n)
+    order = np.argpartition(resid[:n], -k)[-k:]
+    order = order[np.argsort(resid[:n][order])[::-1]]
+    return [(int(seq), int(i), int(token_ids[i]), float(resid[i]), float(peak[i])) for i in order]
+
+
+def record_sequence_spikes(acc, resid_rms, peak, token_ids, seq, topk):
+    if resid_rms is None or peak is None:
+        return
+    n = min(len(resid_rms), len(peak), len(token_ids))
+    med = float(np.median(resid_rms[:n]))
+    resid = resid_rms[:n] / max(med, 1e-12)
+    acc.spikes.extend(top_spike_rows(resid, peak[:n], token_ids[:n], seq, topk))
+
+
+def summarize_spikes(spikes, thr, decode):
+    spikes = np.asarray(spikes, dtype=SPIKE_DTYPE) if spikes is not None else np.zeros(0, dtype=SPIKE_DTYPE)
+    over = spikes[spikes["resid"] > thr] if len(spikes) else spikes
+    n_over = int(len(over))
+    n_pos0 = int((over["pos"] == 0).sum()) if n_over else 0
+    share = (n_pos0 / n_over) if n_over else float("nan")
+    case = "none" if n_over == 0 else ("A" if share >= 0.95 else "B")
+    pos0 = over[over["pos"] == 0] if n_over else over
+    rest = over[over["pos"] > 0] if n_over else over
+    ranking = []
+    if len(rest):
+        for token in np.unique(rest["token"]):
+            rows = rest[rest["token"] == token]
+            ranking.append(dict(
+                token=int(token), text=decode(int(token)), count=int(len(rows)),
+                median_pos=float(np.median(rows["pos"])), median_resid=float(np.median(rows["resid"])),
+            ))
+        ranking.sort(key=lambda row: (-row["count"], -row["median_resid"], row["token"]))
+    return dict(
+        n_over=n_over, pos0=n_pos0, pos0_share=share, case=case,
+        peak_median_pos0=float(np.median(pos0["peak"])) if len(pos0) else None,
+        peak_median_rest=float(np.median(rest["peak"])) if len(rest) else None,
+        ranking=ranking,
+    )
+
+
+def spike_selftest(thr=10, topk=5):
+    """200 条序列：首 token ×50；每 4 条在位置 20 放一个放大 30 倍的换行。应判成情况 B。"""
+    newline, length = 198, 32
+    rows = []
+    for seq in range(200):
+        rms = np.ones(length)
+        rms[0] = 50.0
+        tokens = np.full(length, 11, dtype=np.int32)
+        tokens[0] = 128000
+        peak = np.full(length, 2.0)
+        peak[0] = 9.0
+        if seq % 4 == 0:
+            rms[20] = 30.0
+            tokens[20] = newline
+            peak[20] = 7.0
+        resid = rms / np.median(rms)
+        rows.extend(top_spike_rows(resid, peak, tokens, seq, topk))
+    summary = summarize_spikes(np.array(rows, dtype=SPIKE_DTYPE), thr, lambda token: "\n" if token == newline else str(token))
+    hit = next((row for row in summary["ranking"] if row["text"] == "\n"), None)
+    if summary["case"] != "B" or abs(summary["pos0_share"] - 0.8) > 1e-9 or hit is None or hit["count"] != 50 or hit["median_pos"] != 20:
+        raise AssertionError(f"尖峰自测未判成情况 B：{summary}")
+    print(f"尖峰自测：情况 B，pos 0 占 {summary['pos0_share']:.0%}，换行 {hit['count']} 次，中位位置 {hit['median_pos']:.0f}")
 
 
 class Moments:
@@ -90,6 +168,38 @@ class Moments:
             F = self.fv[(self.fi >= a) & (self.fi < b)]
             S = S - F.T @ F; m = m - F.sum(0); n -= len(F)
         return S / n, m / n, n
+
+
+def make_resid_hook(slot):
+    """挂在 decoder layer 入口。这里还没过 RMSNorm，token RMS 才能看出尖峰。"""
+    import torch
+
+    def hook(_module, args, kwargs):
+        hidden = kwargs.get("hidden_states") if kwargs else None
+        if hidden is None and args:
+            hidden = args[0]
+        if hidden is None:
+            return
+        if hidden.ndim == 3:
+            hidden = hidden[0]
+        hidden = hidden.detach().double()
+        slot["resid_rms"] = torch.sqrt(torch.mean(hidden * hidden, dim=-1)).cpu().numpy()
+    return hook
+
+
+def make_proj_hook(acc, slot):
+    """投影输入只记 peak。这个位置通常已过 RMSNorm，不能用它判断尖峰在不在。"""
+    import torch
+
+    def hook(_module, inputs, acc=acc, slot=slot):
+        activation = inputs[0]
+        if activation.ndim == 3:
+            activation = activation[0]
+        values = activation.detach().double()
+        rms = torch.sqrt(torch.mean(values * values, dim=-1)).clamp_min(1e-12)
+        slot["peak"] = (torch.amax(torch.abs(values), dim=-1) / rms).cpu().numpy()
+        acc.add_seq(values)
+    return hook
 
 
 def collect(args):
@@ -124,18 +234,26 @@ def collect(args):
                 if t.strip():
                     yield t
 
+    version = tuple(int(part) for part in torch.__version__.split("+")[0].split(".")[:2])
+    if version < (2, 0):
+        raise RuntimeError("残差流尖峰审计需要 PyTorch 2.0 及以上：layer 的 pre-hook 要用 with_kwargs。")
     results = {}
     for split, path, mults in (("cal", args.cal, [m for m in SNAP_MULTS if m <= args.mult]),
                                ("eval", args.eval, [args.mult])):
-        accs, hooks = {}, []
+        accs, slots, resid_slots, hooks = {}, {}, {}, []
         for l in args.layers:
+            if l not in resid_slots:
+                resid_slots[l] = {}
+                hooks.append(layers[l].register_forward_pre_hook(
+                    make_resid_hook(resid_slots[l]), with_kwargs=True))
             for pos in args.positions:
                 mod = get_mod(layers[l], POSITIONS[pos][0])
                 d = mod.in_features
                 acc = Accum(d, [m * d for m in mults], zeros, to_np)
+                slot = {}
                 accs[(l, pos)] = acc
-                hooks.append(mod.register_forward_pre_hook(
-                    lambda m, inp, acc=acc: acc.add_seq(inp[0][0].double())))
+                slots[(l, pos)] = slot
+                hooks.append(mod.register_forward_pre_hook(make_proj_hook(acc, slot)))
         t0, n_seq = time.time(), 0
         with torch.no_grad():
             for text in docs(path):
@@ -145,8 +263,12 @@ def collect(args):
                     chunk = ids[s:s + L]
                     if len(chunk) < args.min_len:
                         continue
-                    x = torch.tensor([[tok.bos_token_id] + chunk], device=dev)
-                    model(x, use_cache=False)
+                    token_ids = [tok.bos_token_id] + chunk
+                    model(torch.tensor([token_ids], device=dev), use_cache=False)
+                    for (l, pos), acc in accs.items():
+                        record_sequence_spikes(
+                            acc, resid_slots[l].get("resid_rms"), slots[(l, pos)].get("peak"),
+                            token_ids, n_seq, args.spike_topk)
                     n_seq += 1
                 if all(a.done for a in accs.values()):
                     break
@@ -158,8 +280,16 @@ def collect(args):
         print(f"[{split}] {n_seq} 条序列，{time.time() - t0:.0f}s")
         for k, a in accs.items():
             results.setdefault(k, {}).update(a.save_dict(split))
-    for (l, pos), d in results.items():
-        np.savez(os.path.join(args.out, f"L{l}_{pos}_stats.npz"), **d)
+    report = {"thr": args.spike_thr, "topk": args.spike_topk, "note": "resid 取 decoder layer 输入，peak 取投影输入。第 15 层的 resid 是上一层输出。", "positions": {}}
+    for (l, pos), saved in results.items():
+        np.savez(os.path.join(args.out, f"L{l}_{pos}_stats.npz"), **saved)
+        entry = {}
+        for split in ("cal", "eval"):
+            entry[split] = summarize_spikes(saved.get(f"{split}_spikes"), args.spike_thr, lambda token, tok=tok: tok.decode([int(token)]))
+            print(f"L{l}_{pos} {split} 尖峰情况 {entry[split]['case']}，pos 0 占比 {entry[split]['pos0_share']}")
+        report["positions"][f"L{l}_{pos}"] = entry
+    with open(os.path.join(args.out, "spike_report.json"), "w") as f:
+        json.dump(report, f, ensure_ascii=False, indent=1)
     print("保存到", args.out)
 
 # ======================= 白化 =======================
@@ -463,6 +593,7 @@ def analyze(args):
             allres[f"{name}_{res['first_token']}"] = res
     with open(os.path.join(args.stats, "retest_results.json"), "w") as f:
         json.dump(allres, f, indent=1, default=float)
+    write_spike_report(args.stats, args.spike_thr)
     passed = {k: v["verdict"]["lowrank_pass"] for k, v in allres.items()}
     print("\n汇总 lowrank_pass:", json.dumps(passed, ensure_ascii=False, indent=1))
     return allres
@@ -476,7 +607,28 @@ def make_cfg(args):
         first_modes=[{"incl": False, "excl": True}[m] for m in args.first_token])
 
 # ======================= 自测 =======================
+def write_spike_report(stats_dir, thr):
+    report = {"thr": thr, "note": "这里没有分词器，text 先留空。collect 会写成解码后的文本。", "positions": {}}
+    found = False
+    for fp in sorted(glob.glob(os.path.join(stats_dir, "L*_stats.npz"))):
+        name = os.path.basename(fp)[:-len("_stats.npz")]
+        data = np.load(fp)
+        entry = {}
+        for split in ("cal", "eval"):
+            key = f"{split}_spikes"
+            if key not in data.files:
+                continue
+            found = True
+            entry[split] = summarize_spikes(data[key], thr, lambda token: "")
+        if entry:
+            report["positions"][name] = entry
+    if found:
+        with open(os.path.join(stats_dir, "spike_report.json"), "w") as handle:
+            json.dump(report, handle, ensure_ascii=False, indent=1)
+
+
 def selftest(args):
+    spike_selftest(args.spike_thr, args.spike_topk)
     rng = np.random.default_rng(0)
     d, T, mult = 64, 32, 16
     Q, _ = np.linalg.qr(rng.standard_normal((d, d)))
@@ -512,6 +664,8 @@ def main(argv=None):
     c.add_argument("--mult", type=int, default=16, help="校准/评估 token 数 = mult × d")
     c.add_argument("--seq-len", type=int, default=1024); c.add_argument("--min-len", type=int, default=64)
     c.add_argument("--device", default="cuda")
+    c.add_argument("--spike-thr", type=float, default=10)
+    c.add_argument("--spike-topk", type=int, default=5)
     for p in (sub.add_parser("analyze"), sub.add_parser("selftest")):
         if p.prog.endswith("analyze"):
             p.add_argument("--stats", required=True)
@@ -522,6 +676,8 @@ def main(argv=None):
         p.add_argument("--seeds", type=int, default=5); p.add_argument("--seeds-ext", type=int, default=20)
         p.add_argument("--select-seeds", type=int, default=2, help="选 ε 时每档用的种子数")
         p.add_argument("--first-token", nargs="+", default=["incl", "excl"], choices=["incl", "excl"])
+        p.add_argument("--spike-thr", type=float, default=10)
+        p.add_argument("--spike-topk", type=int, default=5)
     a = ap.parse_args(argv)
     {"collect": collect, "analyze": analyze, "selftest": selftest}[a.cmd](a)
 

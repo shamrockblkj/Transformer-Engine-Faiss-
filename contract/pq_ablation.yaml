@@ -338,6 +338,12 @@ llama_retest:
     reserve: 多采若干条备用。坏序列丢掉之后仍凑满 64 条完整序列，不用半截序列去补。
     eps_split: 校准序列按约 3:1 切开，前一份估 Σ，后一份选 ε，再在该档全部校准序列上重估。
     bos: 每段序列都补一个 BOS，并单独记下首 token。分析时减掉就是排除口径，不用重新采样。两个口径都报。部署时首 token 也要过同一层，用哪个口径等真实激活出来再定。自测里含首 token 的 rho 中位 7.95、最大 18.6，排除后降到 1.06 和 1.38。尖峰落在弱方向上，而且校准集和评估集对不齐。真实模型若也是这样，就要定口径，或者把首 token 单独处理。
+  spike:
+    where: 情况 A 或 B 看残差流，不看投影输入。mlp_in 的投影在 post_attention_layernorm 之后，RMSNorm 把每个 token 的 RMS 拉到 1 附近，token_rms/median 会恒等于 1，永远判成情况 A，而且测不出来。resid 取 decoder layer 的输入，再除以序列中位数。peak 才取投影输入上的 max|x_j|/rms(x)，这是模长被压平之后真正进 Σ 的量。第 15 层的 resid 是上一层的输出，尖峰是前面各层积出来的。
+    hook: layer 的 pre-hook 用 with_kwargs=True，需要 PyTorch 2.0 及以上。HF 新版用关键字参数传 hidden_states。torch 的 hook 还没在真实模型上跑过。
+    output: 每条序列按 resid 留 top-5，字段是序列号、位置、token id、resid、peak，写在 *_stats.npz 的 cal_spikes 和 eval_spikes。spike_report.json 报超过 --spike-thr（默认 10）的尖峰数、其中 pos 0 的占比、pos>0 的 token 排行，以及 pos 0 和其余位置的 peak 中位数。占比 ≥95% 是情况 A，否则是情况 B。
+    selftest: 200 条序列，首 token 放大 50 倍，每 4 条在位置 20 放一个放大 30 倍的换行。判成情况 B，pos 0 占 80%，该 token 出现 50 次、中位位置 20。
+    case_b: 尖峰出现在 pos>0 也不一定要把它们放进 Σ。只出现在固定前缀里，例如 system prompt 的换行，前缀缓存可以预计算 KV，和 BOS 一样。出现在用户输入里且位置不固定，预计算用不上，只能纳入 Σ，或者用旋转把尖峰吸收掉。排行里的 median_pos 和 token 文本用来区分这两种。
     dtype: 激活按 bf16 采集，Σ 用 float64 累加。
   spectrum_first:
     before_pq: 每个位置先出下面几项，不跑 PQ。
