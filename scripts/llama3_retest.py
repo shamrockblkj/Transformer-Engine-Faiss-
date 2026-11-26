@@ -53,7 +53,7 @@ class Accum:
         return self.n >= self.snaps[-1]
 
     def add_seq(self, x):                       # x: (T, d)，float64
-        if self.done:
+        if self.done or len(x) == 0:
             return
         self.first_idx.append(self.n)
         self.first_vec.append(np.asarray(self.to_np(x[0]), np.float64))
@@ -95,11 +95,12 @@ def top_spike_rows(resid, peak, token_ids, seq, topk):
 
 def record_sequence_spikes(acc, resid_rms, peak, token_ids, seq, topk):
     if resid_rms is None or peak is None:
-        return
-    n = min(len(resid_rms), len(peak), len(token_ids))
-    med = float(np.median(resid_rms[:n]))
-    resid = resid_rms[:n] / max(med, 1e-12)
-    acc.spikes.extend(top_spike_rows(resid, peak[:n], token_ids[:n], seq, topk))
+        raise RuntimeError("残差流 RMS 和投影 peak 必须同时存在。缺 resid 时不能改用 peak 打分。")
+    if not (len(resid_rms) == len(peak) == len(token_ids)):
+        raise RuntimeError(f"尖峰长度对不齐：resid {len(resid_rms)}，peak {len(peak)}，token {len(token_ids)}")
+    med = float(np.median(resid_rms))
+    resid = resid_rms / max(med, 1e-12)
+    acc.spikes.extend(top_spike_rows(resid, peak, token_ids, seq, topk))
 
 
 def summarize_spikes(spikes, thr, decode):
@@ -122,6 +123,7 @@ def summarize_spikes(spikes, thr, decode):
         ranking.sort(key=lambda row: (-row["count"], -row["median_resid"], row["token"]))
     return dict(
         n_over=n_over, pos0=n_pos0, pos0_share=share, case=case,
+        seqs_with_later_spike=int(len(np.unique(rest["seq"]))) if len(rest) else 0,
         peak_median_pos0=float(np.median(pos0["peak"])) if len(pos0) else None,
         peak_median_rest=float(np.median(rest["peak"])) if len(rest) else None,
         ranking=ranking,
@@ -147,7 +149,12 @@ def spike_selftest(thr=10, topk=5):
         rows.extend(top_spike_rows(resid, peak, tokens, seq, topk))
     summary = summarize_spikes(np.array(rows, dtype=SPIKE_DTYPE), thr, lambda token: "\n" if token == newline else str(token))
     hit = next((row for row in summary["ranking"] if row["text"] == "\n"), None)
-    if summary["case"] != "B" or abs(summary["pos0_share"] - 0.8) > 1e-9 or hit is None or hit["count"] != 50 or hit["median_pos"] != 20:
+    empty = summarize_spikes(np.zeros(0, dtype=SPIKE_DTYPE), thr, lambda token: "")
+    if empty["case"] != "none":
+        raise AssertionError(f"没有尖峰时不能判成情况 B：{empty}")
+    if (summary["case"] != "B" or abs(summary["pos0_share"] - 0.8) > 1e-9 or hit is None
+            or hit["count"] != 50 or hit["median_pos"] != 20 or summary["seqs_with_later_spike"] != 50
+            or summary["peak_median_pos0"] != 9 or summary["peak_median_rest"] != 7):
         raise AssertionError(f"尖峰自测未判成情况 B：{summary}")
     print(f"尖峰自测：情况 B，pos 0 占 {summary['pos0_share']:.0%}，换行 {hit['count']} 次，中位位置 {hit['median_pos']:.0f}")
 
@@ -165,13 +172,25 @@ class Moments:
         m = self.m[b] - (self.m[a] if a else 0.0)
         n = b - a
         if excl:
-            F = self.fv[(self.fi >= a) & (self.fi < b)]
-            S = S - F.T @ F; m = m - F.sum(0); n -= len(F)
+            mask = (self.fi >= a) & (self.fi < b)
+            if np.any(mask):
+                F = self.fv[mask]
+                S = S - F.T @ F
+                m = m - F.sum(0)
+                n -= len(F)
         return S / n, m / n, n
 
 
-def make_resid_hook(slot):
-    """挂在 decoder layer 入口。这里还没过 RMSNorm，token RMS 才能看出尖峰。"""
+def batch_tokens(activation, where):
+    if activation.ndim == 3:
+        return activation[0]
+    if activation.ndim == 2:
+        return activation
+    raise RuntimeError(f"{where} 的激活形状是 {tuple(activation.shape)}，需要 (T, d) 或 (1, T, d)")
+
+
+def make_resid_hook(slot, layer_idx):
+    """挂在 decoder layer 入口。这里还没过 RMSNorm，token RMS 才能看出尖峰。比值用 float32 就够。"""
     import torch
 
     def hook(_module, args, kwargs):
@@ -179,26 +198,24 @@ def make_resid_hook(slot):
         if hidden is None and args:
             hidden = args[0]
         if hidden is None:
-            return
-        if hidden.ndim == 3:
-            hidden = hidden[0]
-        hidden = hidden.detach().double()
+            raise RuntimeError(f"第 {layer_idx} 层 pre-hook 没有拿到 hidden_states")
+        hidden = batch_tokens(hidden, f"第 {layer_idx} 层残差流").detach().float()
         slot["resid_rms"] = torch.sqrt(torch.mean(hidden * hidden, dim=-1)).cpu().numpy()
     return hook
 
 
 def make_proj_hook(acc, slot):
-    """投影输入只记 peak。这个位置通常已过 RMSNorm，不能用它判断尖峰在不在。"""
+    """投影输入只记 peak。这个位置通常已过 RMSNorm，不能用它判断尖峰在不在。Σ 仍用 float64 累加。"""
     import torch
 
     def hook(_module, inputs, acc=acc, slot=slot):
-        activation = inputs[0]
-        if activation.ndim == 3:
-            activation = activation[0]
-        values = activation.detach().double()
-        rms = torch.sqrt(torch.mean(values * values, dim=-1)).clamp_min(1e-12)
-        slot["peak"] = (torch.amax(torch.abs(values), dim=-1) / rms).cpu().numpy()
-        acc.add_seq(values)
+        if acc.done:
+            return
+        values = batch_tokens(inputs[0], "投影输入").detach()
+        xf = values.float()
+        rms = torch.sqrt(torch.mean(xf * xf, dim=-1)).clamp_min(1e-8)
+        slot["peak"] = (torch.amax(torch.abs(xf), dim=-1) / rms).cpu().numpy()
+        acc.add_seq(values.double())
     return hook
 
 
@@ -206,6 +223,8 @@ def collect(args):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.model)
+    if tok.bos_token_id is None:
+        raise RuntimeError("这个分词器没有 bos_token_id。pos 0 必须是 BOS，不能用 EOS 顶上。")
     model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.bfloat16,
                                                  device_map=args.device).eval()
     layers = model.model.layers
@@ -245,7 +264,7 @@ def collect(args):
             if l not in resid_slots:
                 resid_slots[l] = {}
                 hooks.append(layers[l].register_forward_pre_hook(
-                    make_resid_hook(resid_slots[l]), with_kwargs=True))
+                    make_resid_hook(resid_slots[l], l), with_kwargs=True))
             for pos in args.positions:
                 mod = get_mod(layers[l], POSITIONS[pos][0])
                 d = mod.in_features
@@ -264,12 +283,15 @@ def collect(args):
                     if len(chunk) < args.min_len:
                         continue
                     token_ids = [tok.bos_token_id] + chunk
+                    pending = {key: acc for key, acc in accs.items() if not acc.done}
                     model(torch.tensor([token_ids], device=dev), use_cache=False)
-                    for (l, pos), acc in accs.items():
+                    for (l, pos), acc in pending.items():
                         record_sequence_spikes(
                             acc, resid_slots[l].get("resid_rms"), slots[(l, pos)].get("peak"),
                             token_ids, n_seq, args.spike_topk)
                     n_seq += 1
+                    if all(a.done for a in accs.values()):
+                        break
                 if all(a.done for a in accs.values()):
                     break
         for h in hooks:
@@ -285,7 +307,9 @@ def collect(args):
         np.savez(os.path.join(args.out, f"L{l}_{pos}_stats.npz"), **saved)
         entry = {}
         for split in ("cal", "eval"):
-            entry[split] = summarize_spikes(saved.get(f"{split}_spikes"), args.spike_thr, lambda token, tok=tok: tok.decode([int(token)]))
+            entry[split] = summarize_spikes(
+                saved.get(f"{split}_spikes"), args.spike_thr,
+                lambda token, tok=tok: tok.decode([int(token)], clean_up_tokenization_spaces=False))
             print(f"L{l}_{pos} {split} 尖峰情况 {entry[split]['case']}，pos 0 占比 {entry[split]['pos0_share']}")
         report["positions"][f"L{l}_{pos}"] = entry
     with open(os.path.join(args.out, "spike_report.json"), "w") as f:
@@ -496,7 +520,9 @@ def analyze_position(cal, ev, Ws, cfg, excl):
                 if abs(pr["z"]) < 3 and len(seeds) < cfg.seeds_ext:
                     for s in range(len(seeds), cfg.seeds_ext):
                         for p in ("block", "lowrank"):
-                            ent["mse"][nm][p].append(mse_S(W, recon(p, W, ctx, s, cfg), Se))
+                            Wh = recon(p, W, ctx, s, cfg)
+                            ent["mse"][nm][p].append(mse_S(W, Wh, Se))
+                            ent["small_row_err"][nm][p].append(small_row_err(W, Wh))
                     pr = paired(ent["mse"][nm]["block"], ent["mse"][nm]["lowrank"])
                     pr["extended"] = True
                 ent["paired_lowrank_vs_block"][nm] = pr

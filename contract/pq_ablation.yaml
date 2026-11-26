@@ -341,7 +341,7 @@ llama_retest:
   spike:
     where: 情况 A 或 B 看残差流，不看投影输入。mlp_in 的投影在 post_attention_layernorm 之后，RMSNorm 把每个 token 的 RMS 拉到 1 附近，token_rms/median 会恒等于 1，永远判成情况 A，而且测不出来。resid 取 decoder layer 的输入，再除以序列中位数。peak 才取投影输入上的 max|x_j|/rms(x)，这是模长被压平之后真正进 Σ 的量。第 15 层的 resid 是上一层的输出，尖峰是前面各层积出来的。
     hook: layer 的 pre-hook 用 with_kwargs=True，需要 PyTorch 2.0 及以上。HF 新版用关键字参数传 hidden_states。torch 的 hook 还没在真实模型上跑过。
-    output: 每条序列按 resid 留 top-5，字段是序列号、位置、token id、resid、peak，写在 *_stats.npz 的 cal_spikes 和 eval_spikes。spike_report.json 报超过 --spike-thr（默认 10）的尖峰数、其中 pos 0 的占比、pos>0 的 token 排行，以及 pos 0 和其余位置的 peak 中位数。占比 ≥95% 是情况 A，否则是情况 B。
+    output: 每条序列按 resid 留 top-5，字段是序列号、位置、token id、resid、peak，写在 *_stats.npz 的 cal_spikes 和 eval_spikes。某个位置的 Σ 满了就不再记这个位置的尖峰，也不再把同一篇文档的后半段送进模型。spike_report.json 报超过 --spike-thr（默认 10）的尖峰数、其中 pos 0 的占比、pos>0 的 token 排行和涉及的序列数，以及这些超阈值尖峰里 pos 0 和其余位置的 peak 中位数。没有超阈值尖峰时不判情况。有尖峰且 pos 0 占比 ≥95% 是情况 A，否则是情况 B。缺 resid 时不能改用 peak 打分。
     selftest: 200 条序列，首 token 放大 50 倍，每 4 条在位置 20 放一个放大 30 倍的换行。判成情况 B，pos 0 占 80%，该 token 出现 50 次、中位位置 20。
     case_b: 尖峰出现在 pos>0 也不一定要把它们放进 Σ。只出现在固定前缀里，例如 system prompt 的换行，前缀缓存可以预计算 KV，和 BOS 一样。出现在用户输入里且位置不固定，预计算用不上，只能纳入 Σ，或者用旋转把尖峰吸收掉。排行里的 median_pos 和 token 文本用来区分这两种。
     dtype: 激活按 bf16 采集，Σ 用 float64 累加。
