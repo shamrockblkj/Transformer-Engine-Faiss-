@@ -612,6 +612,8 @@ def analyze_position(cal, ev, Ws, cfg, excl):
         scan[mult] = ent
     out["scan"] = {str(k): v for k, v in scan.items()}
     out["final"] = scan[mmax]
+    # 归类用全部档的 r，含 mse_tol、已通过的档和最大档。不能只看 r_mismatch 标签。
+    out["r_by_mult"] = {str(m): int(scan[m]["r"]) for m in mults}
 
     # 校准倍数：最小的 n，使 (lowrank: r 与最大档相同) 且每个权重
     #   相对最大档的 MSE 增幅 ≤ cal_tol_rel，或配对差值 ≤ cal_tol_se 个标准误
@@ -686,7 +688,8 @@ def print_report(name, res):
                                       for x in f["r_scan"][nm]))
     shown = {k: v["label"] for k, v in res["min_cal_mult"].items()}
     fails = {k: v["fail"] for k, v in res["min_cal_mult"].items() if v.get("fail")}
-    print(f"最小校准倍数 {shown}  失败档 {fails}   判定 {res['verdict']}")
+    rseq = " ".join(f"{m}:{r}" for m, r in res["r_by_mult"].items())
+    print(f"最小校准倍数 {shown}  失败档 {fails}  r 序列 {rseq}   判定 {res['verdict']}")
 
 
 def analyze(args):
