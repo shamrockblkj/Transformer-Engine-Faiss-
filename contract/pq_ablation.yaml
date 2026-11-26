@@ -20,6 +20,11 @@ cost_metric:
 
 tradeoff:
   note: 白化改善整体输出，代价是小范数行变差
+  why:
+    identity: 在 W' = W·Σ^{1/2} 的空间里，||ΔW'||_F^2 = E||ΔW·x||^2。Σ 用的是不减均值的 E[xx^T]。
+    implication: 白化空间里做 k-means，就是在直接压输出 MSE。1.2783 降到 0.4642，约 64%，和这个恒等式一致。
+    cost: 质心集中到激活能量大的方向。小行在弱方向上的分量分不到质心，所以小行相对误差上升。
+    priority: 输出 MSE 优先。小行相对误差只作为代价报告，不能单独否决白化。
   single_seed_128x64:
     raw:        {small_row_relative: 0.1979, output_mse: 1.2783}
     row_rms:    {small_row_relative: 0.1933, output_mse: 1.2672}
@@ -53,7 +58,7 @@ whitening:
     cond_max: 6.458e+04
     cond_median: 4.187e+04
     warnings: [样本数 32 < 10×4, 条件数大于 1e3]
-    conclusion: 0.4642 可以当作原始空间的输出误差。量化后弱方向仍会被放大，复测要记录条件数和 ε。
+    conclusion: 0.4642 就是原始空间的输出误差。prepare_work 和 restore_work 的往返都通过了。
   python_roundtrip_v1:
     script: scripts/whiten_roundtrip_check.py
     data: 与 128×64 自检同一块 W 和同一 32 条 X
@@ -82,6 +87,31 @@ sigma:
     epsilon_moved_the_0_4642: false
   leakage: 估计 Σ 的 32 条激活就是计算输出 MSE 的那 32 条。结果偏乐观。
 
+condition_numbers:
+  accepted_next_issue: 往返已经通过。接下来记条件数，不改 0.4642 的口径。
+  systematic: 16 块全部病态，不是个别块。原始 λmax/λmin 最大 6.564e4，中位 4.231e4，最小 2.165e4。随机激活的中位数大约只有 63。
+  centering_diagnostic:
+    changes_the_metric: false
+    reason: 对输出误差，不减均值的二阶矩是正确的量。减均值协方差只用来对照条件数。
+    this_matrix:
+      uncentered_median: 4.231e4
+      centered_median: 4.162e4
+      centered_max: 6.626e4
+      centered_min: 2.191e4
+      finding: 这 32 条上，减均值没有把条件数降下来。能量在一个坐标的方差里，不在公共均值里。真实 LLM 激活仍要留这条诊断，因为公共均值或离群方向可能只出现在那里。
+  relative_eps:
+    definition: ε = 1.0e-6 * tr(Σ) / 4
+    upper_bound: ε ≤ 1e-6·λmax。条件数 6.564e4 时，ε/λmin 的上界约 6.5%。
+    measured_max: 1.641e-2
+    measured_median: 1.058e-2
+    why_below_the_bound: 一块里有一个大特征值时，tr/4 大约是 λmax/4，所以实际抬高约 1.6%，小于 6.5% 的上界。
+    truncated_blocks: 0
+    reading: 没有触发截断。1.6% 已经会动弱方向，所以每块记 ε/λmin，不记成是或否。
+  absolute_floor:
+    value: 1.0e-8
+    role: 产生 0.4642 的代码用这个绝对下限。它和相对 ε 分开记。
+    truncated_blocks: 0
+
 retest:
   status: 尚未执行
   paths:
@@ -96,5 +126,15 @@ retest:
   report: 每条路径报均值和标准差
   sigma_source: 独立校准集，几百到几千条，估计后固定
   mse_source: 另一批激活
-  record: [eigen_floor, clamped_count, min_raw_eigenvalue]
+  record_per_block:
+    - lambda_max
+    - lambda_min
+    - condition
+    - eps
+    - eps_over_lambda_min
+    - truncated
+    - condition_centered
+  record_counts: [calibration_tokens, eval_tokens]
+  condition_centered_role: 只诊断，不改白化，不改输出 MSE 的口径
   shared_sigma: 六条路径里需要 Σ 的，共用同一份校准估计
+  this_128x64_counts: {calibration_tokens: 32, eval_tokens: 32, eval_is_subset_of_calibration: true}

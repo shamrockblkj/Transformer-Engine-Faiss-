@@ -481,6 +481,118 @@ WhitenCheck check_whiten(const Matrix& activation) {
     return out;
 }
 
+double median_of(std::vector<double> values) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    std::sort(values.begin(), values.end());
+    const size_t n = values.size();
+    if (n % 2 == 1) {
+        return values[n / 2];
+    }
+    return 0.5 * (values[n / 2 - 1] + values[n / 2]);
+}
+
+void print_block_spectrum(const Matrix& activation) {
+    constexpr double kEpsRel = 1e-6;
+    const int subspaces = activation.cols / kDsub;
+    const int tokens = activation.rows;
+    std::vector<double> conds;
+    std::vector<double> centered_conds;
+    std::vector<double> ratios;
+    int truncated = 0;
+    int truncated_floor = 0;
+    int above = 0;
+    std::printf("每块谱，校准样本 %d。白化仍用 E[xx^T]。减均值条件数只诊断。eps = 1e-6·tr/4。\n", tokens);
+    std::printf("%4s %12s %12s %12s %12s %12s %4s %12s\n", "块", "λmax", "λmin", "条件数", "eps", "eps/λmin", "截断",
+                "减均值条件数");
+    for (int s = 0; s < subspaces; ++s) {
+        double sigma[4][4] = {};
+        double mean[4] = {};
+        for (int t = 0; t < tokens; ++t) {
+            double x[4];
+            for (int d = 0; d < 4; ++d) {
+                x[d] = activation.at(t, s * 4 + d);
+                mean[d] += x[d];
+            }
+            for (int a = 0; a < 4; ++a) {
+                for (int b = 0; b < 4; ++b) {
+                    sigma[a][b] += x[a] * x[b];
+                }
+            }
+        }
+        for (int d = 0; d < 4; ++d) {
+            mean[d] /= tokens;
+        }
+        double trace = 0.0;
+        double cov[4][4];
+        for (int a = 0; a < 4; ++a) {
+            for (int b = 0; b < 4; ++b) {
+                sigma[a][b] /= tokens;
+                cov[a][b] = sigma[a][b] - mean[a] * mean[b];
+            }
+            trace += sigma[a][a];
+        }
+        double raw[4];
+        double q[4][4];
+        double a[4][4];
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                a[i][j] = sigma[i][j];
+            }
+        }
+        jacobi_eigen_4(a, q, raw);
+        double craw[4];
+        double cq[4][4];
+        jacobi_eigen_4(cov, cq, craw);
+        double lambda_max = raw[0];
+        double lambda_min = raw[0];
+        double cmax = craw[0];
+        double cmin = craw[0];
+        for (int i = 1; i < 4; ++i) {
+            lambda_max = std::max(lambda_max, raw[i]);
+            lambda_min = std::min(lambda_min, raw[i]);
+            cmax = std::max(cmax, craw[i]);
+            cmin = std::min(cmin, craw[i]);
+        }
+        const double eps = kEpsRel * trace / 4.0;
+        const bool cut = lambda_min < eps;
+        if (cut) {
+            truncated += 1;
+        }
+        if (lambda_min < kEigenFloor) {
+            truncated_floor += 1;
+        }
+        const double ratio = lambda_min > 0.0 ? eps / lambda_min : 0.0;
+        const double cond = lambda_min > 0.0 ? lambda_max / lambda_min : 0.0;
+        const double ccond = cmin > 0.0 ? cmax / cmin : 0.0;
+        if (lambda_min > 0.0) {
+            conds.push_back(cond);
+            ratios.push_back(ratio);
+            if (cond > 1e3) {
+                above += 1;
+            }
+        }
+        if (cmin > 0.0) {
+            centered_conds.push_back(ccond);
+        }
+        std::printf("%4d %12.3e %12.3e %12.3e %12.3e %12.3e %4s %12.3e\n", s, lambda_max, lambda_min, cond, eps, ratio,
+                    cut ? "是" : "否", ccond);
+    }
+    auto max_of = [](const std::vector<double>& values) {
+        return values.empty() ? 0.0 : *std::max_element(values.begin(), values.end());
+    };
+    auto min_of = [](const std::vector<double>& values) {
+        return values.empty() ? 0.0 : *std::min_element(values.begin(), values.end());
+    };
+    std::printf("条件数最大 %.3e，中位 %.3e，最小 %.3e，大于 1e3 的块 %d / %d。\n", max_of(conds), median_of(conds),
+                min_of(conds), above, subspaces);
+    std::printf("减均值后条件数最大 %.3e，中位 %.3e，最小 %.3e。这一列不改白化。\n", max_of(centered_conds),
+                median_of(centered_conds), min_of(centered_conds));
+    std::printf("eps/λmin 最大 %.3e，中位 %.3e。相对 eps 截断 %d 块，绝对下限 %.1e 截断 %d 块。\n", max_of(ratios),
+                median_of(ratios), truncated, kEigenFloor, truncated_floor);
+}
+
 void dump_matrix(const char* path, const Matrix& m) {
     std::FILE* file = std::fopen(path, "wb");
     if (file == nullptr) {
@@ -615,6 +727,7 @@ int main(int argc, char** argv) {
     std::printf("前向核对：||Σ^{1/2} v||^2 与 v^T Σ v 的最大相对差 %.3e。\n", whiten.direction);
     std::printf("Σ 是 %d 个 4×4 块，不是 64×64。特征值下限 %.1e，原始特征值最小 %.3e，被抬高 %d / %d 个。\n",
                 whiten.subspaces, kEigenFloor, whiten.min_raw, whiten.clamped, whiten.eigenvalues);
+    print_block_spectrum(activation);
     if (!(whiten.roundtrip < 1e-12)) {
         std::fprintf(stderr, "白化后反白化没有恢复到 1e-12，0.4642 不能当原始空间误差\n");
         return 1;

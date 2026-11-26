@@ -254,6 +254,96 @@ def load_activation(path: Path, in_features: int) -> np.ndarray:
     return array
 
 
+EPS_REL = 1e-6
+EIGEN_FLOOR = 1e-8
+
+
+def _finite_ratio(numerator: float, denominator: float) -> float | None:
+    if not np.isfinite(numerator) or not np.isfinite(denominator) or denominator <= 0.0:
+        return None
+    return float(numerator / denominator)
+
+
+def _median(values: list[float]) -> float | None:
+    finite = [value for value in values if np.isfinite(value)]
+    if not finite:
+        return None
+    return float(np.median(np.asarray(finite, dtype=np.float64)))
+
+
+def block_diagnostics(activation: np.ndarray, eps_rel: float = EPS_REL, eigen_floor: float = EIGEN_FLOOR) -> dict:
+    """每块记录谱。条件数用未抬高的特征值。减均值只诊断，不进入白化。"""
+    values = np.asarray(activation, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] % DSUB != 0:
+        fail("诊断激活必须是二维，且列数能被 4 整除")
+    n_tokens, width = values.shape
+    groups = width // DSUB
+    sigma = np.zeros((groups, DSUB, DSUB), dtype=np.float64)
+    mean = np.zeros((groups, DSUB), dtype=np.float64)
+    step = max(1, min(4096, (32 * 1024 * 1024) // max(width * 8, 1)))
+    for start in range(0, n_tokens, step):
+        block = np.asarray(values[start : start + step], dtype=np.float64)
+        if not np.isfinite(block).all():
+            fail("激活里有非有限数")
+        view = block.reshape(block.shape[0], groups, DSUB)
+        sigma += np.einsum("tmi,tmj->mij", view, view, optimize=True)
+        mean += view.sum(axis=0)
+    sigma /= float(n_tokens)
+    sigma = 0.5 * (sigma + np.swapaxes(sigma, -1, -2))
+    mean /= float(n_tokens)
+    centered = sigma - mean[:, :, None] * mean[:, None, :]
+    centered = 0.5 * (centered + np.swapaxes(centered, -1, -2))
+
+    blocks = []
+    for index in range(groups):
+        raw = np.linalg.eigvalsh(sigma[index])
+        centered_evals = np.linalg.eigvalsh(centered[index])
+        lambda_max = float(raw[-1])
+        lambda_min = float(raw[0])
+        trace = float(np.trace(sigma[index]))
+        eps = float(eps_rel * trace / DSUB)
+        blocks.append(
+            {
+                "block": index,
+                "lambda_max": lambda_max,
+                "lambda_min": lambda_min,
+                "condition": _finite_ratio(lambda_max, lambda_min),
+                "eps": eps,
+                "eps_over_lambda_min": _finite_ratio(eps, lambda_min),
+                "truncated": bool(lambda_min < eps),
+                "eigen_floor": float(eigen_floor),
+                "floor_over_lambda_min": _finite_ratio(eigen_floor, lambda_min),
+                "truncated_by_floor": bool(lambda_min < eigen_floor),
+                "condition_centered": _finite_ratio(float(centered_evals[-1]), float(centered_evals[0])),
+            }
+        )
+    conditions = [item["condition"] for item in blocks if item["condition"] is not None]
+    centered_conditions = [item["condition_centered"] for item in blocks if item["condition_centered"] is not None]
+    ratios = [item["eps_over_lambda_min"] for item in blocks if item["eps_over_lambda_min"] is not None]
+    return {
+        "centering": "白化仍用 E[xx^T]，不减均值。condition_centered 只诊断。",
+        "eps_definition": "eps = 1e-6 * tr(Σ) / 4",
+        "eigen_floor": eigen_floor,
+        "eigen_floor_role": "当前白化代码把小于 1e-8 的特征值抬到 1e-8。这和相对 eps 是两件事。",
+        "calibration_tokens": int(n_tokens),
+        "blocks": blocks,
+        "summary": {
+            "blocks": groups,
+            "condition_max": max(conditions) if conditions else None,
+            "condition_median": _median(conditions),
+            "condition_min": min(conditions) if conditions else None,
+            "blocks_condition_above_1e3": sum(1 for value in conditions if value > 1e3),
+            "condition_centered_max": max(centered_conditions) if centered_conditions else None,
+            "condition_centered_median": _median(centered_conditions),
+            "condition_centered_min": min(centered_conditions) if centered_conditions else None,
+            "eps_over_lambda_min_max": max(ratios) if ratios else None,
+            "eps_over_lambda_min_median": _median(ratios),
+            "truncated_blocks": sum(1 for item in blocks if item["truncated"]),
+            "truncated_by_floor_blocks": sum(1 for item in blocks if item["truncated_by_floor"]),
+        },
+    }
+
+
 def second_moment(activation: np.ndarray) -> np.ndarray:
     n_tokens, width = activation.shape
     groups = width // DSUB
@@ -373,6 +463,7 @@ def quantize_matrix(weight, activation, *, niter, seed, mse_tokens, min_points, 
     if weight.shape[1] % DSUB != 0:
         fail("列数不能被 4 整除")
     sigma = second_moment(activation)
+    spectrum = block_diagnostics(activation)
     evecs, sqrt_scales, inv_scales = whitening_factors(sigma)
     rms = row_rms(weight)
     indices = mse_indices(activation.shape[0], mse_tokens)
@@ -409,7 +500,9 @@ def quantize_matrix(weight, activation, *, niter, seed, mse_tokens, min_points, 
             }
         )
         print(f"  {name}  小行相对误差 {rel:.4f}  输出 MSE {mse:.4f}", flush=True)
-    return reports, int(min_used), int(indices.size)
+    spectrum["eval_tokens"] = int(indices.size)
+    spectrum["eval_is_subset_of_calibration"] = True
+    return reports, int(min_used), int(indices.size), spectrum
 
 
 def sample_note(rows: int, min_points: int) -> str | None:
@@ -446,7 +539,24 @@ def render_report(payload: dict) -> str:
             f"层 {block['layer']}  {block['role']}_proj  {block['rows']}×{block['cols']}  "
             f"子空间 {block['subspaces']}  磁盘 dtype {block['disk_dtype']}"
         )
-        lines.append(f"Σ 使用的 token 数 {block['sigma_tokens']}，输出 MSE 使用的 token 数 {block['mse_tokens']}")
+        lines.append(
+            f"校准样本 {block['sigma_tokens']}，评估样本 {block['mse_tokens']}"
+            + ("，评估集是校准集的子集" if block.get("eval_is_subset_of_calibration") else "")
+        )
+        summary = block.get("spectrum_summary")
+        if summary:
+            def num(key: str) -> str:
+                value = summary.get(key)
+                return "无" if value is None else f"{value:.3e}"
+
+            lines.append(
+                "每块谱：条件数最大 "
+                f"{num('condition_max')}，中位 {num('condition_median')}，最小 {num('condition_min')}；"
+                f"减均值后中位 {num('condition_centered_median')}（只诊断）；"
+                f"eps/λmin 最大 {num('eps_over_lambda_min_max')}，中位 {num('eps_over_lambda_min_median')}；"
+                f"相对 eps 截断 {summary['truncated_blocks']} 块，"
+                f"绝对下限 1e-8 截断 {summary['truncated_by_floor_blocks']} 块。"
+            )
         if block.get("sample_note"):
             lines.append(block["sample_note"])
         lines.append(f"{'路径':<12} {'小行相对误差':>14} {'输出 MSE':>14}")
@@ -505,7 +615,7 @@ def run_real(args) -> int:
             f"Faiss {faiss.__version__}。",
             flush=True,
         )
-        cases, min_used, used_mse = quantize_matrix(
+        cases, min_used, used_mse, spectrum = quantize_matrix(
             weight,
             activation,
             niter=args.kmeans_niter,
@@ -525,8 +635,11 @@ def run_real(args) -> int:
                 "disk_dtype": disk_dtype,
                 "sigma_tokens": int(activation.shape[0]),
                 "mse_tokens": used_mse,
+                "eval_is_subset_of_calibration": True,
                 "min_points_per_centroid": min_used,
                 "sample_note": sample_note(int(weight.shape[0]), min_used),
+                "spectrum_summary": spectrum["summary"],
+                "blocks": spectrum["blocks"],
                 "cases": cases,
             }
         )
@@ -586,6 +699,14 @@ def run_self_check(args) -> int:
     tokens = np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
     sigma = second_moment(tokens)
     _assert_close(sigma[0], np.diag([1.0, 0.0, 0.0, 0.0]), "二阶矩")
+    known = block_diagnostics(tokens)
+    known_block = known["blocks"][0]
+    _assert_close(known_block["lambda_max"], 1.0, "λmax")
+    _assert_close(known_block["eps"], 2.5e-7, "相对 eps")
+    if known_block["condition"] is not None or known_block["condition_centered"] is not None:
+        fail("常数激活减均值后不应再有条件数；不减均值的 λmin 为 0")
+    if not known_block["truncated"] or not known_block["truncated_by_floor"]:
+        fail("λmin 为 0 时应记为截断")
     evecs, sqrt_e, inv_e = whitening_factors(np.stack([np.diag([4.0, 1.0, 1.0, 1.0])]))
     sample = np.array([[1.0, 2.0, 3.0, 4.0]], dtype=np.float64)
     roundtrip = apply_subspace(apply_subspace(sample, evecs, sqrt_e), evecs, inv_e)
@@ -630,7 +751,7 @@ def run_self_check(args) -> int:
     synthetic_w = rng.normal(size=(512, 16)).astype(np.float32)
     synthetic_x = rng.normal(size=(64, 16)).astype(np.float32)
     synthetic_x[:, 0::4] *= 8.0
-    cases, _min_used, used = quantize_matrix(
+    cases, _min_used, used, spectrum = quantize_matrix(
         synthetic_w,
         synthetic_x,
         niter=2,
@@ -645,6 +766,10 @@ def run_self_check(args) -> int:
         fail("自检指标不是有限数")
     if used < 1:
         fail("自检没有使用 token")
+    if spectrum["summary"]["blocks"] != 4 or "eps_over_lambda_min" not in spectrum["blocks"][0]:
+        fail("复测记录缺每块的 eps/λmin")
+    if spectrum["eval_tokens"] != used or spectrum["calibration_tokens"] != 64:
+        fail("校准样本数和评估样本数没有分开记")
     payload = {
         "scale": "interface_self_check",
         "full_size": False,
@@ -667,7 +792,10 @@ def run_self_check(args) -> int:
                 "disk_dtype": "F32",
                 "sigma_tokens": 64,
                 "mse_tokens": used,
+                "eval_is_subset_of_calibration": True,
                 "min_points_per_centroid": 1,
+                "spectrum_summary": spectrum["summary"],
+                "blocks": spectrum["blocks"],
                 "sample_note": "接口自检把 min_points_per_centroid 设为 1，全尺寸运行不会这样做。",
                 "cases": cases,
             }
@@ -681,6 +809,65 @@ def run_self_check(args) -> int:
         "接口自检结束。上面的数字来自缩小随机矩阵，不是 Llama 3 8B 全尺寸，不能判定 S3。",
         flush=True,
     )
+    return 0
+
+
+def _load_diagnose_matrix(path: Path) -> np.ndarray:
+    if path.suffix == ".npy":
+        array = np.load(path)
+        return np.asarray(array)
+    raw = np.fromfile(path, dtype=np.int32, count=2)
+    if raw.size != 2:
+        fail(f"无法读取 {path}")
+    rows, cols = int(raw[0]), int(raw[1])
+    data = np.fromfile(path, dtype=np.float64, offset=8)
+    if data.size != rows * cols:
+        fail(f"{path} 的长度和形状 {rows}×{cols} 不一致")
+    return data.reshape(rows, cols)
+
+
+def _print_spectrum(spectrum: dict) -> None:
+    summary = spectrum["summary"]
+
+    def num(key: str) -> str:
+        value = summary.get(key)
+        return "无" if value is None else f"{value:.3e}"
+
+    print(spectrum["centering"])
+    print(f"eps 定义：{spectrum['eps_definition']}。{spectrum['eigen_floor_role']}")
+    print(f"校准样本 {spectrum['calibration_tokens']}")
+    print(
+        f"条件数最大 {num('condition_max')}，中位 {num('condition_median')}，最小 {num('condition_min')}，"
+        f"大于 1e3 的块 {summary['blocks_condition_above_1e3']} / {summary['blocks']}"
+    )
+    print(
+        f"减均值后条件数最大 {num('condition_centered_max')}，中位 {num('condition_centered_median')}，"
+        f"最小 {num('condition_centered_min')}。这一列不改白化。"
+    )
+    print(
+        f"eps/λmin 最大 {num('eps_over_lambda_min_max')}，中位 {num('eps_over_lambda_min_median')}。"
+        f"相对 eps 截断 {summary['truncated_blocks']} 块，绝对下限截断 {summary['truncated_by_floor_blocks']} 块。"
+    )
+    if summary["blocks"] <= 32:
+        print(f"{'块':>4} {'λmax':>12} {'λmin':>12} {'条件数':>12} {'eps':>12} {'eps/λmin':>12} {'截断':>4} {'减均值条件数':>12}")
+        for item in spectrum["blocks"]:
+            def cell(value: float | None) -> str:
+                return "无" if value is None else f"{value:.3e}"
+
+            print(
+                f"{item['block']:4d} {cell(item['lambda_max']):>12} {cell(item['lambda_min']):>12} "
+                f"{cell(item['condition']):>12} {cell(item['eps']):>12} {cell(item['eps_over_lambda_min']):>12} "
+                f"{'是' if item['truncated'] else '否':>4} {cell(item['condition_centered']):>12}"
+            )
+
+
+def run_diagnose(path: Path, out: Path | None) -> int:
+    spectrum = block_diagnostics(_load_diagnose_matrix(path))
+    _print_spectrum(spectrum)
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(spectrum, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"每块记录已写入 {out}")
     return 0
 
 
@@ -701,11 +888,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--check-inputs", action="store_true", help="只核对形状，不训练")
     parser.add_argument("--self-check", action="store_true", help="云端接口自检，不是全尺寸结论")
+    parser.add_argument("--diagnose", type=Path, help="只打印激活的每块谱，不训练。接受 npy 或 pq_layer 的 bin")
+    parser.add_argument("--diagnose-out", type=Path, help="把 --diagnose 的每块记录写成 json")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.diagnose is not None:
+        return run_diagnose(args.diagnose, args.diagnose_out)
     if args.self_check:
         if args.out == Path("out/pq_faiss_layer"):
             args.out = Path("out/pq_faiss_self_check")
