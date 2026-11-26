@@ -619,7 +619,14 @@ def analyze_position(cal, ev, Ws, cfg, excl):
             if ok:
                 return mult
         return None
-    out["min_cal_mult"] = dict(block=pick("block"), lowrank=pick("lowrank"))
+    def describe(mult):
+        # 最大档和自己比一定通过。顶在最大档只说明扫描范围内没收敛，不是“需要这一档”。
+        if mult is None:
+            return dict(mult=None, converged=False, label=None)
+        converged = mult < mmax
+        label = str(mult) if converged else f">={mmax} (未收敛)"
+        return dict(mult=mult, converged=converged, label=label)
+    out["min_cal_mult"] = {path: describe(pick(path)) for path in ("block", "lowrank")}
 
     f = out["final"]
     n_seeds = {nm: len(pr["seeds"]) for nm, pr in f["paired_lowrank_vs_block"].items()}
@@ -660,7 +667,8 @@ def print_report(name, res):
               f"胜 {pr['wins']}/{pr['n']}{' (已加种子)' if pr.get('extended') else ''}")
         print("    r 扫描: " + "  ".join(f"r={x['r']} {x['mean']:.4g}(z={x['vs_r_eff']['z']:.1f})"
                                       for x in f["r_scan"][nm]))
-    print(f"最小校准倍数 {res['min_cal_mult']}   判定 {res['verdict']}")
+    shown = {k: v["label"] for k, v in res["min_cal_mult"].items()}
+    print(f"最小校准倍数 {shown}   判定 {res['verdict']}")
 
 
 def analyze(args):
