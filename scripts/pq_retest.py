@@ -286,6 +286,7 @@ def print_rank_scan(weight, calib, eval_act, eps, ranks, seeds):
             f"  r={ranks[0]} 减 r={rank}：均值 {delta.mean():+.4f}，标准差 {delta.std(ddof=1):.4f}。"
             f"r={rank} 更好 {int(np.sum(delta > 0))} 次，更差 {int(np.sum(delta < 0))} 次。"
         )
+    print("r 取高于 ε 的特征值个数，不另外调，也不往上加。比它大，弱方向的放大会回来。")
 
 
 def main() -> int:
