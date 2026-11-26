@@ -43,10 +43,21 @@ python3 scripts/pq_faiss_layer.py \
     --out out/pq_layer0
 ```
 
-激活文件是 C 顺序 npy，float32 或 float16：
+激活文件由测量主机从本地模型导出，脚本不下载权重。默认最多 256 个 token，不是 512×2048 的全量校准：
 
-- `layer0.gate_up.npy`，形状 `[token 数, 4096]`
-- `layer0.down.npy`，形状 `[token 数, 14336]`
+```bash
+python3 scripts/export_layer_activations.py \
+    --weights /路径/Meta-Llama-3-8B \
+    --prompts /路径/prompt.txt \
+    --layers 0 \
+    --max-tokens 256 \
+    --out /路径/校准激活
+```
+
+导出结果是 C 顺序 float32 npy：
+
+- `layer0.gate_up.npy`，形状 `[token 数, 4096]`，进入 MLP 的隐藏状态
+- `layer0.down.npy`，形状 `[token 数, 14336]`，`down_proj` 的输入
 
 四组都会写入 `out/pq_layer0/report.txt`：原样、行 RMS、子空间加权、两者都用。缩小自检里「两者都用」的小行相对误差是 0.2260，高于原样 0.1979；全尺寸报告也要四组都留。这一步不能判定 S3。
 
