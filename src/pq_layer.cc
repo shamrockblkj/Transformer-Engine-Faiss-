@@ -177,27 +177,35 @@ struct Report {
     double output_mse = 0.0;
 };
 
-Report run_case(const Matrix& weight, const Matrix& activation, bool row_norm, bool whiten, int centroids_per_sub) {
+struct Prepared {
+    Matrix work;
+    std::vector<double> scale;
+    std::vector<SubspaceBasis> bases;
+    bool whiten = false;
+};
+
+Prepared prepare_work(const Matrix& weight, const Matrix& activation, bool row_norm, bool whiten) {
+    Prepared prep;
+    prep.whiten = whiten;
     const int n = weight.rows;
     const int kdim = weight.cols;
     const int m = kdim / kDsub;
-    std::vector<double> scale(static_cast<size_t>(n), 1.0);
-    Matrix work = weight;
+    prep.scale.assign(static_cast<size_t>(n), 1.0);
+    prep.work = weight;
     if (row_norm) {
         for (int r = 0; r < n; ++r) {
             double ss = 0.0;
             for (int c = 0; c < kdim; ++c) {
                 ss += weight.at(r, c) * weight.at(r, c);
             }
-            scale[static_cast<size_t>(r)] = std::sqrt(ss / kdim);
-            scale[static_cast<size_t>(r)] = std::max(scale[static_cast<size_t>(r)], 1e-8);
+            prep.scale[static_cast<size_t>(r)] = std::sqrt(ss / kdim);
+            prep.scale[static_cast<size_t>(r)] = std::max(prep.scale[static_cast<size_t>(r)], 1e-8);
             for (int c = 0; c < kdim; ++c) {
-                work.at(r, c) = weight.at(r, c) / scale[static_cast<size_t>(r)];
+                prep.work.at(r, c) = weight.at(r, c) / prep.scale[static_cast<size_t>(r)];
             }
         }
     }
-
-    std::vector<SubspaceBasis> bases(static_cast<size_t>(m));
+    prep.bases.resize(static_cast<size_t>(m));
     if (whiten) {
         for (int s = 0; s < m; ++s) {
             double sigma[4][4] = {};
@@ -217,19 +225,55 @@ Report run_case(const Matrix& weight, const Matrix& activation, bool row_norm, b
                     sigma[a][b] /= activation.rows;
                 }
             }
-            bases[static_cast<size_t>(s)] = basis_from_sigma(sigma);
+            prep.bases[static_cast<size_t>(s)] = basis_from_sigma(sigma);
             for (int r = 0; r < n; ++r) {
-                double v[4], out[4];
+                double v[4];
+                double out[4];
                 for (int d = 0; d < 4; ++d) {
-                    v[d] = work.at(r, s * 4 + d);
+                    v[d] = prep.work.at(r, s * 4 + d);
                 }
-                apply_sym(bases[static_cast<size_t>(s)].q, bases[static_cast<size_t>(s)].sqrt_scale, v, out);
+                apply_sym(prep.bases[static_cast<size_t>(s)].q, prep.bases[static_cast<size_t>(s)].sqrt_scale, v, out);
                 for (int d = 0; d < 4; ++d) {
-                    work.at(r, s * 4 + d) = out[d];
+                    prep.work.at(r, s * 4 + d) = out[d];
                 }
             }
         }
     }
+    return prep;
+}
+
+Matrix restore_work(const Matrix& coded, const Prepared& prep) {
+    Matrix out = make_matrix(coded.rows, coded.cols);
+    const int m = coded.cols / kDsub;
+    for (int s = 0; s < m; ++s) {
+        for (int r = 0; r < coded.rows; ++r) {
+            double v[4];
+            for (int d = 0; d < 4; ++d) {
+                v[d] = coded.at(r, s * 4 + d);
+            }
+            if (prep.whiten) {
+                double back[4];
+                apply_sym(prep.bases[static_cast<size_t>(s)].q, prep.bases[static_cast<size_t>(s)].inv_sqrt_scale, v, back);
+                for (int d = 0; d < 4; ++d) {
+                    v[d] = back[d];
+                }
+            }
+            for (int d = 0; d < 4; ++d) {
+                out.at(r, s * 4 + d) = v[d] * prep.scale[static_cast<size_t>(r)];
+            }
+        }
+    }
+    return out;
+}
+
+Report run_case(const Matrix& weight, const Matrix& activation, bool row_norm, bool whiten, int centroids_per_sub) {
+    const int n = weight.rows;
+    const int kdim = weight.cols;
+    const int m = kdim / kDsub;
+    const Prepared prep = prepare_work(weight, activation, row_norm, whiten);
+    const Matrix& work = prep.work;
+    const std::vector<double>& scale = prep.scale;
+    const std::vector<SubspaceBasis>& bases = prep.bases;
 
     Matrix recon = make_matrix(n, kdim);
     std::mt19937 rng(7);
@@ -455,9 +499,104 @@ void dump_matrix(const char* path, const Matrix& m) {
     }
 }
 
+Matrix load_matrix(const char* path) {
+    std::FILE* file = std::fopen(path, "rb");
+    if (file == nullptr) {
+        std::fprintf(stderr, "无法读取 %s\n", path);
+        std::exit(1);
+    }
+    std::int32_t rows = 0;
+    std::int32_t cols = 0;
+    const bool header_ok = std::fread(&rows, sizeof(rows), 1, file) == 1 &&
+                           std::fread(&cols, sizeof(cols), 1, file) == 1 && rows > 0 && cols > 0;
+    Matrix matrix = header_ok ? make_matrix(rows, cols) : Matrix{};
+    const bool body_ok = header_ok && std::fread(matrix.v.data(), sizeof(double), matrix.v.size(), file) == matrix.v.size();
+    std::fclose(file);
+    if (!body_ok) {
+        std::fprintf(stderr, "读取 %s 失败\n", path);
+        std::exit(1);
+    }
+    return matrix;
+}
+
+void save_state(const char* path, const Prepared& prep) {
+    std::FILE* file = std::fopen(path, "wb");
+    if (file == nullptr) {
+        std::fprintf(stderr, "无法写出 %s\n", path);
+        std::exit(1);
+    }
+    const std::int32_t rows = static_cast<std::int32_t>(prep.scale.size());
+    const std::int32_t subspaces = static_cast<std::int32_t>(prep.bases.size());
+    const std::int32_t whiten = prep.whiten ? 1 : 0;
+    const std::int32_t cols = prep.work.cols;
+    std::fwrite(&rows, sizeof(rows), 1, file);
+    std::fwrite(&subspaces, sizeof(subspaces), 1, file);
+    std::fwrite(&whiten, sizeof(whiten), 1, file);
+    std::fwrite(&cols, sizeof(cols), 1, file);
+    std::fwrite(prep.scale.data(), sizeof(double), prep.scale.size(), file);
+    for (const SubspaceBasis& basis : prep.bases) {
+        std::fwrite(basis.q, sizeof(double), 16, file);
+        std::fwrite(basis.sqrt_scale, sizeof(double), 4, file);
+        std::fwrite(basis.inv_sqrt_scale, sizeof(double), 4, file);
+    }
+    std::fclose(file);
+}
+
+Prepared load_state(const char* path) {
+    std::FILE* file = std::fopen(path, "rb");
+    if (file == nullptr) {
+        std::fprintf(stderr, "无法读取 %s\n", path);
+        std::exit(1);
+    }
+    std::int32_t rows = 0;
+    std::int32_t subspaces = 0;
+    std::int32_t whiten = 0;
+    std::int32_t cols = 0;
+    bool ok = std::fread(&rows, sizeof(rows), 1, file) == 1 &&
+              std::fread(&subspaces, sizeof(subspaces), 1, file) == 1 &&
+              std::fread(&whiten, sizeof(whiten), 1, file) == 1 &&
+              std::fread(&cols, sizeof(cols), 1, file) == 1 && rows > 0 && cols > 0 && subspaces > 0;
+    Prepared prep;
+    if (ok) {
+        prep.whiten = whiten != 0;
+        prep.scale.resize(static_cast<size_t>(rows));
+        prep.bases.resize(static_cast<size_t>(subspaces));
+        prep.work = make_matrix(rows, cols);
+        ok = std::fread(prep.scale.data(), sizeof(double), prep.scale.size(), file) == prep.scale.size();
+    }
+    for (SubspaceBasis& basis : prep.bases) {
+        ok = ok && std::fread(basis.q, sizeof(double), 16, file) == 16 &&
+             std::fread(basis.sqrt_scale, sizeof(double), 4, file) == 4 &&
+             std::fread(basis.inv_sqrt_scale, sizeof(double), 4, file) == 4;
+    }
+    std::fclose(file);
+    if (!ok) {
+        std::fprintf(stderr, "读取 %s 失败\n", path);
+        std::exit(1);
+    }
+    return prep;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 6 && std::strcmp(argv[1], "--whiten") == 0) {
+        const Matrix weight = load_matrix(argv[2]);
+        const Matrix activation = load_matrix(argv[3]);
+        const bool row_norm = std::strcmp(argv[5], "rms") == 0;
+        const Prepared prep = prepare_work(weight, activation, row_norm, true);
+        const std::string dir = argv[4];
+        dump_matrix((dir + "/Wp.bin").c_str(), prep.work);
+        save_state((dir + "/state.bin").c_str(), prep);
+        return 0;
+    }
+    if (argc == 5 && std::strcmp(argv[1], "--unwhiten") == 0) {
+        const Matrix coded = load_matrix(argv[2]);
+        const Prepared prep = load_state(argv[3]);
+        dump_matrix(argv[4], restore_work(coded, prep));
+        return 0;
+    }
+
     constexpr int kRows = 128;
     constexpr int kCols = 64;
     constexpr int kTokens = 32;

@@ -37,7 +37,24 @@ whitening:
     statement: "||Σ^{1/2} v||^2 与 v^T Σ v 一致，前向不是 Σ^{-1/2}"
     max_relative: 5.442e-15
     passed: true
-  python_roundtrip:
+  python_roundtrip_v2:
+    script: scripts/whiten_roundtrip_check_v2.py
+    calls: pq_layer 的 prepare_work 与 restore_work，不是检查脚本自己的参考实现
+    data: 与 128×64 自检同一块 W 和同一 32 条 X
+    pass_bar: weight_rel < 1.0e-10 且 eye_err < 1.0e-7
+    whiten_only:
+      weight_rel: 1.011e-15
+      out_rel: 8.192e-16
+      passed: true
+    row_rms_and_whiten:
+      weight_rel: 1.009e-15
+      out_rel: 8.411e-16
+      passed: true
+    cond_max: 6.458e+04
+    cond_median: 4.187e+04
+    warnings: [样本数 32 < 10×4, 条件数大于 1e3]
+    conclusion: 0.4642 可以当作原始空间的输出误差。量化后弱方向仍会被放大，复测要记录条件数和 ε。
+  python_roundtrip_v1:
     script: scripts/whiten_roundtrip_check.py
     data: 与 128×64 自检同一块 W 和同一 32 条 X
     order: 行 RMS，再 W' = W Σ^{1/2}，不量化，乘 Σ^{-1/2}，乘回行尺度
