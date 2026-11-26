@@ -604,10 +604,13 @@ def analyze_position(cal, ev, Ws, cfg, excl):
     # 校准倍数：最小的 n，使 (lowrank: r 与最大档相同) 且每个权重
     #   相对最大档的 MSE 增幅 ≤ cal_tol_rel，或配对差值 ≤ cal_tol_se 个标准误
     def pick(path):
+        """返回 (选中的倍数, 失败档)。失败原因只有两种：r_mismatch 或 mse_tol。"""
         ref = scan[mmax]
+        fails = {}
         for mult in mults:
             e = scan[mult]
             if path == "lowrank" and e["r"] != ref["r"]:
+                fails[str(mult)] = "r_mismatch"
                 continue
             ok = True
             for nm in Ws:
@@ -616,17 +619,20 @@ def analyze_position(cal, ev, Ws, cfg, excl):
                 rel = np.mean(a_) / np.mean(b_) - 1
                 if not (rel <= cfg.cal_tol_rel or pr["mean"] <= cfg.cal_tol_se * pr["se"]):
                     ok = False
+                    break
             if ok:
-                return mult
-        return None
-    def describe(mult):
+                return mult, fails
+            fails[str(mult)] = "mse_tol"
+        return None, fails
+    def describe(path):
         # 最大档和自己比一定通过。顶在最大档只说明扫描范围内没收敛，不是“需要这一档”。
+        mult, fails = pick(path)
         if mult is None:
-            return dict(mult=None, converged=False, label=None)
+            return dict(mult=None, converged=False, label=None, fail=fails)
         converged = mult < mmax
         label = str(mult) if converged else f">={mmax} (未收敛)"
-        return dict(mult=mult, converged=converged, label=label)
-    out["min_cal_mult"] = {path: describe(pick(path)) for path in ("block", "lowrank")}
+        return dict(mult=mult, converged=converged, label=label, fail=fails)
+    out["min_cal_mult"] = {path: describe(path) for path in ("block", "lowrank")}
 
     f = out["final"]
     n_seeds = {nm: len(pr["seeds"]) for nm, pr in f["paired_lowrank_vs_block"].items()}
@@ -668,7 +674,8 @@ def print_report(name, res):
         print("    r 扫描: " + "  ".join(f"r={x['r']} {x['mean']:.4g}(z={x['vs_r_eff']['z']:.1f})"
                                       for x in f["r_scan"][nm]))
     shown = {k: v["label"] for k, v in res["min_cal_mult"].items()}
-    print(f"最小校准倍数 {shown}   判定 {res['verdict']}")
+    fails = {k: v["fail"] for k, v in res["min_cal_mult"].items() if v.get("fail")}
+    print(f"最小校准倍数 {shown}  失败档 {fails}   判定 {res['verdict']}")
 
 
 def analyze(args):
