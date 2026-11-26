@@ -474,6 +474,18 @@ def select_eps(Ws, Sfit, Sval, cfg):
     return cfg.eps_grid[i], i in (0, len(cfg.eps_grid) - 1), curve
 
 
+def scan_label(n_scan, mult, mmax):
+    """扫描只有一档时不判收敛。多档里顶在最大档，记成未收敛。"""
+    if n_scan < 2:
+        shown = mult if mult is not None else mmax
+        return None, f"{shown} (仅一档，不判收敛)"
+    if mult is None:
+        return False, None
+    converged = mult < mmax
+    label = str(mult) if converged else f">={mmax} (未收敛)"
+    return converged, label
+
+
 def analyze_position(cal, ev, Ws, cfg, excl):
     d = next(iter(Ws.values())).shape[1]
     N = cal.snaps[-1]
@@ -610,7 +622,7 @@ def analyze_position(cal, ev, Ws, cfg, excl):
         for mult in mults:
             e = scan[mult]
             if path == "lowrank" and e["r"] != ref["r"]:
-                fails[str(mult)] = "r_mismatch"
+                fails[str(mult)] = f"r_mismatch(r={e['r']}→{ref['r']})"
                 continue
             ok = True
             for nm in Ws:
@@ -626,12 +638,11 @@ def analyze_position(cal, ev, Ws, cfg, excl):
         return None, fails
     def describe(path):
         # 最大档和自己比一定通过。顶在最大档只说明扫描范围内没收敛，不是“需要这一档”。
+        # 扫描只剩一档时，这一档自己就是最大档，没有更大的档可比，不判收敛。
         mult, fails = pick(path)
-        if mult is None:
-            return dict(mult=None, converged=False, label=None, fail=fails)
-        converged = mult < mmax
-        label = str(mult) if converged else f">={mmax} (未收敛)"
-        return dict(mult=mult, converged=converged, label=label, fail=fails)
+        converged, label = scan_label(len(mults), mult, mmax)
+        shown = mult if mult is not None else (mmax if len(mults) < 2 else None)
+        return dict(mult=shown, converged=converged, n_scan=len(mults), label=label, fail=fails)
     out["min_cal_mult"] = {path: describe(path) for path in ("block", "lowrank")}
 
     f = out["final"]
@@ -737,6 +748,10 @@ def selftest(args):
     strict = paired([2.0, 2.0], [1.0, 1.0])
     if tie["z"] != 0 or not math.isnan(one["z"]) or strict["z"] != float("inf"):
         raise AssertionError(f"配对 z 口径不对：平局 {tie['z']}，单种子 {one['z']}，恒定领先 {strict['z']}")
+    if scan_label(1, 1, 1) != (None, "1 (仅一档，不判收敛)"):
+        raise AssertionError(f"单档扫描不该判收敛：{scan_label(1, 1, 1)}")
+    if scan_label(5, 16, 16) != (False, ">=16 (未收敛)") or scan_label(5, 2, 16) != (True, "2"):
+        raise AssertionError("多档收敛标签不对")
     spike_selftest(args.spike_thr, args.spike_topk)
     rng = np.random.default_rng(0)
     d, T, mult = 64, 32, 16
