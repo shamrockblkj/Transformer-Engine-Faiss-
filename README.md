@@ -15,7 +15,7 @@ python3 scripts/pq_faiss_layer.py --self-check
 python3 scripts/gate0_host.py --list
 ```
 
-`make test` 只做查表索引对拍，以及 128×64 的自制 k-means 算法自检。那个自检不是 Faiss，不能当作 S3。
+`make test` 只做查表索引对拍，以及 128×64 的自制 k-means 算法自检。那个自检不是 Faiss，不能当作 S3。口径和复测矩阵在 [contract/pq_ablation.yaml](contract/pq_ablation.yaml)。
 
 `pq_faiss_layer.py --self-check` 只确认 faiss-cpu 1.16.0 的 `train` / `compute_codes` 接口。输出里的误差来自缩小随机矩阵。
 

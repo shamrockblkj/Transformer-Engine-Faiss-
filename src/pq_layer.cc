@@ -70,9 +70,12 @@ void jacobi_eigen_4(double a_in[4][4], double q[4][4], double eval[4]) {
         }
     }
     for (int i = 0; i < 4; ++i) {
-        eval[i] = std::max(a[i][i], 1e-8);
+        eval[i] = a[i][i];
     }
 }
+
+// 特征值下限。低于此值时 Σ^{1/2} 与 Σ^{-1/2} 用同一个抬高后的值，往返仍成立，但变换不再是原始 Σ。
+inline constexpr double kEigenFloor = 1e-8;
 
 void apply_sym(const double q[4][4], const double scale[4], const double v[4], double out[4]) {
     double rot[4] = {};
@@ -107,6 +110,7 @@ SubspaceBasis basis_from_sigma(const double sigma[4][4]) {
     }
     jacobi_eigen_4(a, b.q, eval);
     for (int i = 0; i < 4; ++i) {
+        eval[i] = std::max(eval[i], kEigenFloor);
         b.sqrt_scale[i] = std::sqrt(eval[i]);
         b.inv_sqrt_scale[i] = 1.0 / b.sqrt_scale[i];
     }
@@ -336,6 +340,101 @@ Matrix ill_conditioned_activation(int tokens, int cols, std::mt19937* rng) {
     return x;
 }
 
+struct WhitenCheck {
+    double roundtrip = 0.0;
+    double direction = 0.0;
+    int subspaces = 0;
+    int eigenvalues = 0;
+    int clamped = 0;
+    double min_raw = 0.0;
+};
+
+WhitenCheck check_whiten(const Matrix& activation) {
+    WhitenCheck out;
+    std::mt19937 rng(3);
+    std::normal_distribution<double> normal(0.0, 1.0);
+    out.min_raw = 1e300;
+    for (int trial = 0; trial < 32; ++trial) {
+        double factor[4][4];
+        double sigma[4][4] = {};
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                factor[i][j] = normal(rng);
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                for (int k = 0; k < 4; ++k) {
+                    sigma[i][j] += factor[k][i] * factor[k][j];
+                }
+            }
+        }
+        const SubspaceBasis basis = basis_from_sigma(sigma);
+        for (int sample = 0; sample < 8; ++sample) {
+            double v[4];
+            double mid[4];
+            double back[4];
+            for (int d = 0; d < 4; ++d) {
+                v[d] = normal(rng);
+            }
+            apply_sym(basis.q, basis.sqrt_scale, v, mid);
+            apply_sym(basis.q, basis.inv_sqrt_scale, mid, back);
+            for (int d = 0; d < 4; ++d) {
+                out.roundtrip = std::max(out.roundtrip, std::fabs(back[d] - v[d]));
+            }
+            double quad = 0.0;
+            double norm = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                norm += mid[i] * mid[i];
+                for (int j = 0; j < 4; ++j) {
+                    quad += v[i] * sigma[i][j] * v[j];
+                }
+            }
+            const double scale = std::max(std::fabs(quad), 1e-12);
+            out.direction = std::max(out.direction, std::fabs(norm - quad) / scale);
+        }
+    }
+
+    const int subspaces = activation.cols / kDsub;
+    out.subspaces = subspaces;
+    for (int s = 0; s < subspaces; ++s) {
+        double sigma[4][4] = {};
+        for (int t = 0; t < activation.rows; ++t) {
+            double x[4];
+            for (int d = 0; d < 4; ++d) {
+                x[d] = activation.at(t, s * 4 + d);
+            }
+            for (int a = 0; a < 4; ++a) {
+                for (int b = 0; b < 4; ++b) {
+                    sigma[a][b] += x[a] * x[b];
+                }
+            }
+        }
+        for (int a = 0; a < 4; ++a) {
+            for (int b = 0; b < 4; ++b) {
+                sigma[a][b] /= activation.rows;
+            }
+        }
+        double raw[4];
+        double q[4][4];
+        double a[4][4];
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                a[i][j] = sigma[i][j];
+            }
+        }
+        jacobi_eigen_4(a, q, raw);
+        for (int i = 0; i < 4; ++i) {
+            out.eigenvalues += 1;
+            out.min_raw = std::min(out.min_raw, raw[i]);
+            if (raw[i] < kEigenFloor) {
+                out.clamped += 1;
+            }
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 int main() {
@@ -346,6 +445,19 @@ int main() {
     std::mt19937 rng(11);
     const Matrix weight = small_row_weights(kRows, kCols, &rng);
     const Matrix activation = ill_conditioned_activation(kTokens, kCols, &rng);
+    const WhitenCheck whiten = check_whiten(activation);
+    std::printf("白化往返：不经量化，最大绝对误差 %.3e。\n", whiten.roundtrip);
+    std::printf("前向核对：||Σ^{1/2} v||^2 与 v^T Σ v 的最大相对差 %.3e。\n", whiten.direction);
+    std::printf("Σ 是 %d 个 4×4 块，不是 64×64。特征值下限 %.1e，原始特征值最小 %.3e，被抬高 %d / %d 个。\n",
+                whiten.subspaces, kEigenFloor, whiten.min_raw, whiten.clamped, whiten.eigenvalues);
+    if (!(whiten.roundtrip < 1e-12)) {
+        std::fprintf(stderr, "白化后反白化没有恢复到 1e-12，0.4642 不能当原始空间误差\n");
+        return 1;
+    }
+    if (!(whiten.direction < 1e-8)) {
+        std::fprintf(stderr, "量化前的变换不是 Σ^{1/2}\n");
+        return 1;
+    }
 
     const Report raw = run_case(weight, activation, false, false, kCentroids);
     const Report rows = run_case(weight, activation, true, false, kCentroids);

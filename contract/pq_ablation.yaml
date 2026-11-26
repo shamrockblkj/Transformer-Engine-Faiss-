@@ -1,0 +1,71 @@
+# PQ 消融契约。只约束 128×64 自检和此后的复测口径。
+# 0.4642 仍是单种子自制 k-means 的结果，不是 Faiss 全尺寸，不能判定 S3。
+
+status: 复测前核对已完成，六条路径的复测尚未执行
+
+primary_metric:
+  name: 输出 MSE
+  space: 反白化并乘回行尺度之后的原始空间
+  query: 激活保持原样，不做白化
+  priority: 优先指标
+
+cost_metric:
+  name: 小行相对误差
+  definition: 按行 L2 范数取最小的 n/4 行，平均 ||w-ŵ||/||w||
+  rule: 不能单独否决白化
+  ceiling:
+    rule: 相对原样的升幅超过 X% 时，必须单独评审
+    X_percent: null
+    X_status: 等多种子结果出来后再定
+
+tradeoff:
+  note: 白化改善整体输出，代价是小范数行变差
+  single_seed_128x64:
+    raw:        {small_row_relative: 0.1979, output_mse: 1.2783}
+    row_rms:    {small_row_relative: 0.1933, output_mse: 1.2672}
+    whiten:     {small_row_relative: 0.2043, output_mse: 0.4642}
+    both:       {small_row_relative: 0.2260, output_mse: 0.4602}
+
+whitening:
+  layout: 权重按行存放。量化前对每个 4 维子向量做 W' = W Σ^{1/2}
+  inverse: 质心反白化是 W' Σ^{-1/2}，再乘回行尺度
+  roundtrip_without_quantization:
+    required_abs: 1.0e-12
+    measured_abs: 8.349e-14
+    passed: true
+  forward_check:
+    statement: "||Σ^{1/2} v||^2 与 v^T Σ v 一致，前向不是 Σ^{-1/2}"
+    max_relative: 5.442e-15
+    passed: true
+
+sigma:
+  shape: 每个子空间一个 4×4 块
+  full_matrix: false
+  subspaces_in_128x64: 16
+  centering: 不减均值，使用 E[xx^T]
+  eigen_floor: 1.0e-8
+  eigen_floor_meaning: 开方前把小于该值的特征值抬到该值。抬高后往返仍用同一对尺度。
+  this_run:
+    activation_rows: 32
+    eigenvalues: 64
+    min_raw_eigenvalue: 9.417e-4
+    clamped: 0
+    epsilon_moved_the_0_4642: false
+  leakage: 估计 Σ 的 32 条激活就是计算输出 MSE 的那 32 条。结果偏乐观。
+
+retest:
+  status: 尚未执行
+  paths:
+    - 原样
+    - 行 RMS
+    - 子空间白化
+    - 两者都用
+    - OPQMatrix
+    - PCAMatrix(eigen_power=-0.5)
+  path_count: 6
+  kmeans_seeds_per_path: 5
+  report: 每条路径报均值和标准差
+  sigma_source: 独立校准集，几百到几千条，估计后固定
+  mse_source: 另一批激活
+  record: [eigen_floor, clamped_count, min_raw_eigenvalue]
+  shared_sigma: 六条路径里需要 Σ 的，共用同一份校准估计
