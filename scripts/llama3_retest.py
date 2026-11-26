@@ -18,6 +18,7 @@
       --cal cal.jsonl --eval eval.jsonl --layers 1 15 --positions attn_in o_in mlp_in --out runs/
   python llama3_retest.py analyze --stats runs/ --d-sub 4 --k 256
   python llama3_retest.py selftest
+正式判定用默认的 5 个种子，不够再加到 20。把种子降到 2、选 ε 只用 1 个种子，只说明流程能跑完，不能据此采纳低秩。
 cal.jsonl / eval.jsonl：每行一个 {"text": ...}，两份文件的文档互不重叠（按文档切分，不按 token）。
 """
 import argparse, glob, json, math, os, sys, time, warnings
@@ -415,12 +416,21 @@ def small_row_err(W, Wh, q=0.25):
 
 def paired(a, b):
     """gain = a − b（a = 对照，b = 候选；为正表示候选更好）。"""
-    g = np.asarray(a) - np.asarray(b); n = len(g)
-    sd = float(g.std(ddof=1)) if n > 1 else float("nan")
-    se = sd / math.sqrt(n) if n > 1 else float("nan")
-    return dict(n=n, mean=float(g.mean()), std=sd, se=se,
-                z=float(g.mean() / se) if se and se > 0 else float("inf"),
-                wins=int((g > 0).sum()))
+    g = np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64)
+    n = len(g)
+    mean = float(g.mean()) if n else float("nan")
+    if n > 1:
+        sd = float(g.std(ddof=1))
+        se = sd / math.sqrt(n)
+        if se > 0:
+            z = float(mean / se)
+        elif mean == 0:
+            z = 0.0
+        else:
+            z = math.copysign(float("inf"), mean)
+    else:
+        sd = se = z = float("nan")
+    return dict(n=n, mean=mean, std=sd, se=se, z=z, wins=int((g > 0).sum()))
 
 
 def ms(x):
@@ -654,6 +664,11 @@ def write_spike_report(stats_dir, thr):
 
 
 def selftest(args):
+    tie = paired([1.0, 1.0, 1.0], [1.0, 1.0, 1.0])
+    one = paired([2.0], [1.0])
+    strict = paired([2.0, 2.0], [1.0, 1.0])
+    if tie["z"] != 0 or not math.isnan(one["z"]) or strict["z"] != float("inf"):
+        raise AssertionError(f"配对 z 口径不对：平局 {tie['z']}，单种子 {one['z']}，恒定领先 {strict['z']}")
     spike_selftest(args.spike_thr, args.spike_topk)
     rng = np.random.default_rng(0)
     d, T, mult = 64, 32, 16
