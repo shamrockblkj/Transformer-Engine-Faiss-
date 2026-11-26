@@ -121,7 +121,7 @@ SubspaceBasis basis_from_sigma(const double sigma[4][4]) {
 }
 
 void kmeans(const std::vector<double>& points, int n, int k, std::vector<double>* centroids, std::vector<int>* assign,
-            std::mt19937* rng) {
+            std::mt19937* rng, int iterations = 8) {
     centroids->assign(static_cast<size_t>(k) * kDsub, 0.0);
     std::uniform_int_distribution<int> pick(0, n - 1);
     for (int c = 0; c < k; ++c) {
@@ -133,7 +133,7 @@ void kmeans(const std::vector<double>& points, int n, int k, std::vector<double>
     assign->assign(static_cast<size_t>(n), 0);
     std::vector<double> sum(static_cast<size_t>(k) * kDsub);
     std::vector<int> count(static_cast<size_t>(k));
-    for (int iter = 0; iter < 8; ++iter) {
+    for (int iter = 0; iter < iterations; ++iter) {
         std::fill(sum.begin(), sum.end(), 0.0);
         std::fill(count.begin(), count.end(), 0);
         for (int i = 0; i < n; ++i) {
@@ -309,7 +309,7 @@ void fill_error_split(const Matrix& weight, const Matrix& recon, const Matrix& a
 }
 
 Report run_case(const Matrix& weight, const Matrix& activation, bool row_norm, bool whiten, int centroids_per_sub,
-                bool diagonal, Matrix* recon_out = nullptr) {
+                bool diagonal, Matrix* recon_out = nullptr, int kmeans_seed = 7, int iterations = 8) {
     const int n = weight.rows;
     const int kdim = weight.cols;
     const int m = kdim / kDsub;
@@ -319,7 +319,7 @@ Report run_case(const Matrix& weight, const Matrix& activation, bool row_norm, b
     const std::vector<SubspaceBasis>& bases = prep.bases;
 
     Matrix recon = make_matrix(n, kdim);
-    std::mt19937 rng(7);
+    std::mt19937 rng(kmeans_seed);
     for (int s = 0; s < m; ++s) {
         std::vector<double> points(static_cast<size_t>(n) * kDsub);
         for (int r = 0; r < n; ++r) {
@@ -329,7 +329,7 @@ Report run_case(const Matrix& weight, const Matrix& activation, bool row_norm, b
         }
         std::vector<double> centroids;
         std::vector<int> assign;
-        kmeans(points, n, centroids_per_sub, &centroids, &assign, &rng);
+        kmeans(points, n, centroids_per_sub, &centroids, &assign, &rng, iterations);
         for (int r = 0; r < n; ++r) {
             const int c = assign[static_cast<size_t>(r)];
             double v[4];
@@ -515,6 +515,24 @@ void random_orthogonal_n(std::mt19937* rng, int n, std::vector<double>* q) {
     }
 }
 
+void fill_latent_activation(Matrix* x, const std::vector<double>& q, std::mt19937* rng, bool one_large) {
+    std::normal_distribution<double> unit(0.0, 1.0);
+    std::vector<double> latent(static_cast<size_t>(x->cols));
+    for (int t = 0; t < x->rows; ++t) {
+        for (int c = 0; c < x->cols; ++c) {
+            const double scale = one_large ? (c == 0 ? 8.0 : 0.05) : ((c % kDsub == 0) ? 8.0 : 0.05);
+            latent[static_cast<size_t>(c)] = scale * unit(*rng);
+        }
+        for (int row = 0; row < x->cols; ++row) {
+            double value = 0.0;
+            for (int col = 0; col < x->cols; ++col) {
+                value += q[static_cast<size_t>(row) * x->cols + col] * latent[static_cast<size_t>(col)];
+            }
+            x->at(t, row) = value;
+        }
+    }
+}
+
 Matrix cross_block_activation(int tokens, int cols, std::mt19937* rng, bool one_large) {
     // 先按坐标缩放潜变量，再左乘全局正交阵。旋转必须作用在 X 上。
     // one_large：只有第 0 个潜变量是 8，其余是 0.05。
@@ -522,22 +540,201 @@ Matrix cross_block_activation(int tokens, int cols, std::mt19937* rng, bool one_
     std::vector<double> q;
     random_orthogonal_n(rng, cols, &q);
     Matrix x = make_matrix(tokens, cols);
-    std::normal_distribution<double> unit(0.0, 1.0);
-    std::vector<double> latent(static_cast<size_t>(cols));
-    for (int t = 0; t < tokens; ++t) {
-        for (int c = 0; c < cols; ++c) {
-            const double scale = one_large ? (c == 0 ? 8.0 : 0.05) : ((c % kDsub == 0) ? 8.0 : 0.05);
-            latent[static_cast<size_t>(c)] = scale * unit(*rng);
-        }
-        for (int row = 0; row < cols; ++row) {
-            double value = 0.0;
-            for (int col = 0; col < cols; ++col) {
-                value += q[static_cast<size_t>(row) * cols + col] * latent[static_cast<size_t>(col)];
+    fill_latent_activation(&x, q, rng, one_large);
+    return x;
+}
+
+void jacobi_eigen_n(std::vector<double>* a, int n, std::vector<double>* vectors, std::vector<double>* eval) {
+    vectors->assign(static_cast<size_t>(n) * n, 0.0);
+    for (int i = 0; i < n; ++i) {
+        (*vectors)[static_cast<size_t>(i) * n + i] = 1.0;
+    }
+    auto at = [&](int r, int c) -> double& { return (*a)[static_cast<size_t>(r) * n + c]; };
+    for (int sweep = 0; sweep < 50; ++sweep) {
+        double off = 0.0;
+        for (int p = 0; p < n; ++p) {
+            for (int q = p + 1; q < n; ++q) {
+                off += at(p, q) * at(p, q);
             }
-            x.at(t, row) = value;
+        }
+        if (off < 1e-24 * n) {
+            break;
+        }
+        for (int p = 0; p < n; ++p) {
+            for (int q = p + 1; q < n; ++q) {
+                const double apq = at(p, q);
+                if (std::fabs(apq) < 1e-18) {
+                    continue;
+                }
+                const double app = at(p, p);
+                const double aqq = at(q, q);
+                const double tau = (aqq - app) / (2.0 * apq);
+                const double t = ((tau >= 0.0) ? 1.0 : -1.0) / (std::fabs(tau) + std::sqrt(1.0 + tau * tau));
+                const double c = 1.0 / std::sqrt(1.0 + t * t);
+                const double s = t * c;
+                at(p, p) = app - t * apq;
+                at(q, q) = aqq + t * apq;
+                at(p, q) = 0.0;
+                at(q, p) = 0.0;
+                for (int k = 0; k < n; ++k) {
+                    if (k == p || k == q) {
+                        continue;
+                    }
+                    const double aik = at(p, k);
+                    const double aqk = at(q, k);
+                    const double new_pk = c * aik - s * aqk;
+                    const double new_qk = s * aik + c * aqk;
+                    at(p, k) = new_pk;
+                    at(k, p) = new_pk;
+                    at(q, k) = new_qk;
+                    at(k, q) = new_qk;
+                }
+                for (int k = 0; k < n; ++k) {
+                    const double vip = (*vectors)[static_cast<size_t>(k) * n + p];
+                    const double viq = (*vectors)[static_cast<size_t>(k) * n + q];
+                    (*vectors)[static_cast<size_t>(k) * n + p] = c * vip - s * viq;
+                    (*vectors)[static_cast<size_t>(k) * n + q] = s * vip + c * viq;
+                }
+            }
         }
     }
-    return x;
+    eval->resize(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        (*eval)[static_cast<size_t>(i)] = at(i, i);
+    }
+}
+
+double held_out_mse(const Matrix& weight, const Matrix& recon, const Matrix& eval_act) {
+    double total = 0.0;
+    for (int t = 0; t < eval_act.rows; ++t) {
+        for (int r = 0; r < weight.rows; ++r) {
+            double y = 0.0;
+            double yh = 0.0;
+            for (int c = 0; c < weight.cols; ++c) {
+                const double x = eval_act.at(t, c);
+                y += weight.at(r, c) * x;
+                yh += recon.at(r, c) * x;
+            }
+            const double diff = y - yh;
+            total += diff * diff;
+        }
+    }
+    return total / (static_cast<double>(eval_act.rows) * weight.rows);
+}
+
+Matrix full_whiten_recon(const Matrix& weight, const Matrix& calib, int centroids, int seed, int iterations) {
+    const int cols = weight.cols;
+    const int tokens = calib.rows;
+    std::vector<double> sigma(static_cast<size_t>(cols) * cols, 0.0);
+    for (int t = 0; t < tokens; ++t) {
+        for (int a = 0; a < cols; ++a) {
+            for (int b = 0; b < cols; ++b) {
+                sigma[static_cast<size_t>(a) * cols + b] += calib.at(t, a) * calib.at(t, b);
+            }
+        }
+    }
+    double trace = 0.0;
+    for (int i = 0; i < cols; ++i) {
+        sigma[static_cast<size_t>(i) * cols + i] /= tokens;
+        trace += sigma[static_cast<size_t>(i) * cols + i];
+        for (int j = i + 1; j < cols; ++j) {
+            const double value = 0.5 * (sigma[static_cast<size_t>(i) * cols + j] + sigma[static_cast<size_t>(j) * cols + i]) / tokens;
+            sigma[static_cast<size_t>(i) * cols + j] = value;
+            sigma[static_cast<size_t>(j) * cols + i] = value;
+        }
+    }
+    const double eps = 1e-6 * trace / cols;
+    for (int i = 0; i < cols; ++i) {
+        sigma[static_cast<size_t>(i) * cols + i] += eps;
+    }
+    const std::vector<double> second = sigma;
+    std::vector<double> vectors;
+    std::vector<double> eval;
+    jacobi_eigen_n(&sigma, cols, &vectors, &eval);
+    std::vector<double> root(static_cast<size_t>(cols) * cols, 0.0);
+    std::vector<double> inv(static_cast<size_t>(cols) * cols, 0.0);
+    for (int i = 0; i < cols; ++i) {
+        const double lam = std::max(eval[static_cast<size_t>(i)], eps);
+        const double s = std::sqrt(lam);
+        const double inv_s = 1.0 / s;
+        for (int r = 0; r < cols; ++r) {
+            for (int c = 0; c < cols; ++c) {
+                const double vir = vectors[static_cast<size_t>(r) * cols + i];
+                const double vic = vectors[static_cast<size_t>(c) * cols + i];
+                root[static_cast<size_t>(r) * cols + c] += vir * s * vic;
+                inv[static_cast<size_t>(r) * cols + c] += vir * inv_s * vic;
+            }
+        }
+    }
+    Matrix whitened = make_matrix(weight.rows, cols);
+    for (int r = 0; r < weight.rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            double value = 0.0;
+            for (int k = 0; k < cols; ++k) {
+                value += weight.at(r, k) * root[static_cast<size_t>(k) * cols + c];
+            }
+            whitened.at(r, c) = value;
+        }
+    }
+    Matrix recon_w = make_matrix(weight.rows, cols);
+    std::mt19937 rng(seed);
+    for (int s = 0; s < cols / kDsub; ++s) {
+        std::vector<double> points(static_cast<size_t>(weight.rows) * kDsub);
+        for (int r = 0; r < weight.rows; ++r) {
+            for (int d = 0; d < kDsub; ++d) {
+                points[static_cast<size_t>(r) * kDsub + d] = whitened.at(r, s * kDsub + d);
+            }
+        }
+        std::vector<double> centers;
+        std::vector<int> assign;
+        kmeans(points, weight.rows, centroids, &centers, &assign, &rng, iterations);
+        for (int r = 0; r < weight.rows; ++r) {
+            const int chosen = assign[static_cast<size_t>(r)];
+            for (int d = 0; d < kDsub; ++d) {
+                recon_w.at(r, s * kDsub + d) = centers[static_cast<size_t>(chosen) * kDsub + d];
+            }
+        }
+    }
+    std::vector<double> probe(static_cast<size_t>(cols));
+    for (int i = 0; i < cols; ++i) {
+        probe[static_cast<size_t>(i)] = 0.1 * ((i % 7) - 3);
+    }
+    double quad = 0.0;
+    double norm = 0.0;
+    for (int i = 0; i < cols; ++i) {
+        double mid = 0.0;
+        for (int k = 0; k < cols; ++k) {
+            mid += root[static_cast<size_t>(k) * cols + i] * probe[static_cast<size_t>(k)];
+        }
+        norm += mid * mid;
+        for (int j = 0; j < cols; ++j) {
+            quad += probe[static_cast<size_t>(i)] * second[static_cast<size_t>(i) * cols + j] * probe[static_cast<size_t>(j)];
+        }
+    }
+    const double direction = std::fabs(norm - quad) / std::max(std::fabs(quad), 1e-12);
+    if (!(direction < 1e-6)) {
+        std::fprintf(stderr, "完整白化的前向不是 Σ^{1/2}，相对差 %.3e\n", direction);
+        std::exit(1);
+    }
+    Matrix recon = make_matrix(weight.rows, cols);
+    double roundtrip = 0.0;
+    for (int r = 0; r < weight.rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            double value = 0.0;
+            double back = 0.0;
+            for (int k = 0; k < cols; ++k) {
+                value += recon_w.at(r, k) * inv[static_cast<size_t>(k) * cols + c];
+                back += whitened.at(r, k) * inv[static_cast<size_t>(k) * cols + c];
+            }
+            recon.at(r, c) = value;
+            roundtrip = std::max(roundtrip, std::fabs(back - weight.at(r, c)));
+        }
+    }
+    if (!(roundtrip < 1e-6)) {
+        std::fprintf(stderr, "完整白化不量化时没有回到权重，误差 %.3e\n", roundtrip);
+        std::exit(1);
+    }
+    return recon;
 }
 
 struct WhitenCheck {
@@ -996,6 +1193,50 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("这是一个大潜变量的特例。十六个大潜变量时交叉项仍会接近零，不能用这个占比决定子空间大小。\n");
+    const int seeds[5] = {7, 8, 9, 10, 11};
+    int negative_seeds = 0;
+    std::printf("一个大潜变量，同一批 X，5 个 k-means 种子的交叉项占比：");
+    for (int seed : seeds) {
+        const Report seeded = run_case(weight, crossed, false, true, kCentroids, false, nullptr, seed);
+        const double share = seeded.cross_mse / std::max(std::fabs(seeded.output_mse), 1e-30);
+        std::printf(" %d:%.1f%%", seed, 100.0 * share);
+        if (share < 0.0) {
+            negative_seeds += 1;
+        }
+    }
+    std::printf("。负号 %d / 5。\n", negative_seeds);
+
+    constexpr int kHeld = 256;
+    std::mt19937 shared_rng(31);
+    std::vector<double> shared_q;
+    random_orthogonal_n(&shared_rng, kCols, &shared_q);
+    Matrix calib = make_matrix(kHeld, kCols);
+    Matrix eval_act = make_matrix(kHeld, kCols);
+    std::mt19937 calib_rng(101);
+    std::mt19937 eval_rng(202);
+    fill_latent_activation(&calib, shared_q, &calib_rng, true);
+    fill_latent_activation(&eval_act, shared_q, &eval_rng, true);
+    double block_sum = 0.0;
+    double full_sum = 0.0;
+    std::printf("一个大潜变量，独立校准 %d 条、评估 %d 条。输出 MSE：\n", kHeld, kHeld);
+    for (int seed : seeds) {
+        Matrix block_recon;
+        run_case(weight, calib, false, true, kCentroids, false, &block_recon, seed, 8);
+        const Matrix full_recon = full_whiten_recon(weight, calib, kCentroids, seed, 8);
+        const double block_mse = held_out_mse(weight, block_recon, eval_act);
+        const double full_mse = held_out_mse(weight, full_recon, eval_act);
+        block_sum += block_mse;
+        full_sum += full_mse;
+        std::printf("  种子 %d  块白化 %.4f  完整白化 %.4f\n", seed, block_mse, full_mse);
+    }
+    const double block_mean = block_sum / 5.0;
+    const double full_mean = full_sum / 5.0;
+    std::printf("五种子平均：块白化 %.4f，完整白化 %.4f。\n", block_mean, full_mean);
+    Matrix block_long;
+    run_case(weight, calib, false, true, kCentroids, false, &block_long, 7, 25);
+    const Matrix full_long = full_whiten_recon(weight, calib, kCentroids, 7, 25);
+    std::printf("同一划分、种子 7、25 次迭代：块白化 %.4f，完整白化 %.4f。\n", held_out_mse(weight, block_long, eval_act),
+                held_out_mse(weight, full_long, eval_act));
     std::mt19937 many_rng(31);
     const Matrix many = cross_block_activation(kTokens, kCols, &many_rng, false);
     Matrix many_recon;

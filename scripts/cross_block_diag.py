@@ -36,10 +36,32 @@ def cross_block_diag(activation: np.ndarray, delta: np.ndarray, d_sub: int = 4, 
     max_canon = float(np.abs(canonical * (1 - mask)).max())
     correlation = np.corrcoef(residual.T)
     resid_cross = float(np.abs(correlation * (1 - mask)).mean())
-    return float(off_energy), max_canon, resid_cross
+    top_corr, top_share, top_quad = direction_block_corr(second, residual, d_sub)
+    return float(off_energy), max_canon, resid_cross, top_corr, top_share, top_quad
 
 
-def read_case(directory: Path) -> tuple[float, float, float]:
+def direction_block_corr(second: np.ndarray, residual: np.ndarray, d_sub: int) -> tuple[float, float, float]:
+    """把各块残差投到 Σ 的最大特征向量上。Pearson 相关会按块标准化，二次型才是交叉项本身。"""
+    moment = 0.5 * (second + second.T)
+    evals, evecs = np.linalg.eigh(moment)
+    top = int(np.argmax(evals))
+    width = moment.shape[0]
+    groups = width // d_sub
+    direction = evecs[:, top].reshape(groups, d_sub)
+    projected = np.einsum("ibd,bd->ib", residual.reshape(residual.shape[0], groups, d_sub), direction)
+    within = np.sum(projected * projected, axis=1)
+    total = np.sum(projected, axis=1) ** 2
+    quad = float((total - within).sum() / total.sum()) if float(total.sum()) > 0.0 else float("nan")
+    std = projected.std(axis=0)
+    keep = std > 1e-8
+    if int(keep.sum()) < 2:
+        return float("nan"), float(evals[top] / np.trace(moment)), quad
+    corr = np.corrcoef(projected[:, keep].T)
+    off = ~np.eye(corr.shape[0], dtype=bool)
+    return float(corr[off].mean()), float(evals[top] / np.trace(moment)), quad
+
+
+def read_case(directory: Path) -> tuple[float, float, float, float, float, float]:
     weight = load_matrix(directory / "W.bin")
     activation = load_matrix(directory / "X.bin")
     recon = load_matrix(directory / "recon.bin")
@@ -57,11 +79,13 @@ def main() -> int:
     else:
         names = cases
         dirs = [args.root / name for name in names]
-    print(f"{'数据':<8} {'①跨块能量':>12} {'②最大典型相关':>14} {'③残差相关':>12}")
+    print(f"{'数据':<8} {'①跨块能量':>12} {'②最大典型相关':>14} {'③旧':>8} {'③相关':>8} {'③二次型':>8} {'主方向能量':>10}")
     for name, directory in zip(names, dirs):
-        off_energy, max_canon, resid_cross = read_case(directory)
-        print(f"{name:<8} {off_energy:12.3f} {max_canon:14.3f} {resid_cross:12.3f}")
-        if not np.isfinite([off_energy, max_canon, resid_cross]).all():
+        off_energy, max_canon, resid_cross, top_corr, top_share, top_quad = read_case(directory)
+        print(
+            f"{name:<8} {off_energy:12.3f} {max_canon:14.3f} {resid_cross:8.3f} {top_corr:8.3f} {top_quad:8.3f} {top_share:10.3f}"
+        )
+        if not np.isfinite([off_energy, max_canon, resid_cross, top_corr, top_share, top_quad]).all():
             print("三步检查出现非有限数", file=sys.stderr)
             return 1
     return 0

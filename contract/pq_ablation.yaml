@@ -141,7 +141,7 @@ retest:
     - PCAMatrix(eigen_power=-0.5)
   path_count: 8
   diag_whiten: 只用 Σ 的对角元做逐通道缩放，不做 4×4 旋转。接近块白化就说明旋转没起作用；明显更差就说明块内协方差有贡献。
-  full_whiten: 用完整 Σ^{1/2} 变换权重，再对变换后的向量做子空间 PQ。和块白化的输出 MSE 之差才是块对角近似的损失。交叉项占比只作辅助。校准集必须独立，而且样本数不少于 max(256, 维度)。n=32 的 64×64 Σ 秩最多 32，求逆主要由 ε 决定，128×64 自检不跑这条，也不写它的 MSE。
+  full_whiten: 用完整 Σ^{1/2} 变换权重，再对变换后的向量做子空间 PQ。和块白化的输出 MSE 之差才是块对角近似的损失。交叉项占比只作辅助，它的绝对值不能直接当损失。校准集必须独立，而且样本数不少于 max(256, 维度)。n=32 的 64×64 Σ 秩最多 32，求逆主要由 ε 决定，128×64 自检不拿那次的 MSE 当这条的结果。
   kmeans_seeds_per_path: 5
   report: 每条路径报均值和标准差
   sigma_source: 独立校准集，几百到几千条，估计后固定
@@ -172,12 +172,20 @@ retest:
     sigma_off_block_energy: 0.904
     unquantized_cross_share: -30.761
     whiten: {small_row_relative: 0.2031, output_mse: 0.0191, within_share: 1.353, cross_share: -0.353}
-    reading: 一个大潜变量时，块白化的交叉项占 -35.3%。这是残差被同一方向绑在一起的特例，不能证明交叉项诊断在一般 PQ 残差上能看见跨块结构。
+    reading: 一个大潜变量时，种子 7 的交叉项占 -35.3%。同一批 X 上另四个 k-means 种子是 -11.1%、-43.4%、-14.7%、-5.6%，负号 5/5。符号稳定，幅度不稳定。各块误差沿大方向系统性反相关，总误差小于块内部分，块对角近似在这个特例里占了便宜。交叉项的绝对值不能直接当损失。
   three_step:
     script: scripts/cross_block_diag.py
-    definition: ① ||Σ 的非对角块|| / ||Σ||；② 块白化后 Σ 的非对角块最大绝对值；③ 残差各列相关矩阵的非对角块绝对值平均。
+    definition: ① ||Σ 的非对角块|| / ||Σ||，要和坐标独立那组的 0.578 比，不能和 0 比；② 块白化后 Σ 的非对角块最大绝对值；③旧是残差各列相关矩阵的非对角块绝对值平均，只在 Σ 接近各向同性时有意义。③改成把各块残差投到 Σ 的最大特征向量 u 上，a_{i,b}=u_bᵀδ_{i,b}。Pearson 是这些投影按块标准化后的平均相关。二次型是 Σ_i[(Σ_b a_{i,b})²−Σ_b a_{i,b}²] / Σ_i(Σ_b a_{i,b})²，对应 Σ≈λuuᵀ 时的交叉项。
     null_resid: 128 行独立残差的 |相关系数| 期望大约是 0.07。
-    axis: {off_energy: 0.578, max_canon: 0.603, resid_cross: 0.072, cross_share: -0.022}
-    many: {off_energy: 0.880, max_canon: 0.848, resid_cross: 0.070, output_mse: 1.2613, cross_share: -0.016}
-    one: {off_energy: 0.951, max_canon: 0.887, resid_cross: 0.066, output_mse: 0.0191, cross_share: -0.353}
-    reading: 坐标独立时 ① 已有 0.578，因为 n=32 的非对角条目多，估计噪声会进 Frobenius 范数。全局旋转后 many 是 0.880、one 是 0.951，旋转作用在 X 上。三组的 ③ 都在 0.07 附近，是残差独立的底，不是跨块结构。many 的交叉项 -1.6% 就是各块残差求和后抵消，不能说明块对角近似没有损失。损失改用 full_whiten 和块白化的输出 MSE 差距来量。
+    axis: {off_energy: 0.578, max_canon: 0.603, resid_cross: 0.072, top_pearson: -0.028, top_quad: -0.305, top_energy: 0.169, cross_share: -0.022}
+    many: {off_energy: 0.880, max_canon: 0.848, resid_cross: 0.070, top_pearson: -0.014, top_quad: -0.289, top_energy: 0.160, output_mse: 1.2613, cross_share: -0.016}
+    one: {off_energy: 0.951, max_canon: 0.887, resid_cross: 0.066, top_pearson: -0.015, top_quad: -0.358, top_energy: 0.997, output_mse: 0.0191, cross_share: -0.353}
+    reading: ① 的 0.880 和 0.951 高于坐标独立的 0.578，旋转作用在 X 上。③旧三组都在 0.07 附近，单一方向被其余坐标冲淡。改成投到主方向以后，Pearson 仍只有 -0.015 左右，因为按块标准化会抹掉幅度。二次型在 one 上是 -35.8%，和交叉项 -35.3% 对齐，这个方向占迹的 99.7%。axis 和 many 的主方向二次型也大约 -30%，但那个方向只占迹的 16% 左右，所以总交叉项仍然接近零。交叉项不适合当主诊断。
+  full_vs_block:
+    data: 合成，一个大潜变量再乘全局正交阵。正交阵来自种子 31。校准 256 条，种子 101。评估 256 条，种子 202。两批独立。k-means 种子 7 到 11，8 次迭代，8 个质心。
+    check: 前向用 ||Σ^{1/2} v||² 对 vᵀΣv，相对差必须小于 1e-6，否则程序退出。不量化的往返也必须小于 1e-6。这次两项都过了。
+    block_mse: [0.0228, 0.0244, 0.0206, 0.0204, 0.0195]
+    full_mse: [0.0269, 0.0235, 0.0204, 0.0224, 0.0218]
+    mean: {block: 0.0216, full: 0.0230}
+    longer: {seed: 7, iterations: 25, block: 0.0212, full: 0.0261}
+    reading: 这一组按理最该拉开差距，完整白化并没有更好，加到 25 次迭代以后还略差。实现上的平方根方向和往返都过了检查。和五种子交叉项稳定为负放在一起看，块对角近似在这个秩 1 情形里靠残差抵消占了便宜，固定的 4 维分块也没有把完整度量的优势兑现成更低的输出 MSE。
