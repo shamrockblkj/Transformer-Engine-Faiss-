@@ -44,7 +44,7 @@ tradeoff:
       whiten: {within_mse: 0.4743, within_share: 1.022, cross_mse: -0.0101, cross_share: -0.022}
       diag_whiten: {within_mse: 0.4737, within_share: 1.023, cross_mse: -0.0108, cross_share: -0.023}
     diag_reading: 0.4630 和 0.4642 几乎相同，小行相对误差都是 0.2043，交叉项都约 -2.2%。坐标独立时每个 4×4 的 Σ 基本是对角阵，非对角只是 32 条样本的估计噪声，所以 Σ^{1/2} 和逐通道 √E[x²] 几乎相同。这只说明两条路径算法一致，说明不了块内结构有没有用。
-    cross_reading: 坐标独立时交叉项本来就接近噪声。交叉项诊断能不能用来加大子空间，要看反向对照，不看这组 -2.2%。
+    cross_reading: 交叉项小只说明各块残差没有叠加，不能说明块对角近似没有损失。块白化按 Σ_bb 分配质心，全局最优要用条件度量 Σ_bb − Σ_bc Σ_cc⁻¹ Σ_cb。这部分损失不在交叉项里。交叉项占比只作辅助。
 
 whitening:
   layout: 权重按行存放。量化前对每个 4 维子向量做 W' = W Σ^{1/2}
@@ -136,10 +136,12 @@ retest:
     - 子空间白化
     - 两者都用
     - 对角白化
+    - full_whiten
     - OPQMatrix
     - PCAMatrix(eigen_power=-0.5)
-  path_count: 7
+  path_count: 8
   diag_whiten: 只用 Σ 的对角元做逐通道缩放，不做 4×4 旋转。接近块白化就说明旋转没起作用；明显更差就说明块内协方差有贡献。
+  full_whiten: 用完整 Σ^{1/2} 变换权重，再对变换后的向量做子空间 PQ。和块白化的输出 MSE 之差才是块对角近似的损失。交叉项占比只作辅助。校准集必须独立，而且样本数不少于 max(256, 维度)。n=32 的 64×64 Σ 秩最多 32，求逆主要由 ε 决定，128×64 自检不跑这条，也不写它的 MSE。
   kmeans_seeds_per_path: 5
   report: 每条路径报均值和标准差
   sigma_source: 独立校准集，几百到几千条，估计后固定
@@ -165,9 +167,17 @@ retest:
     cost: 小行相对误差从对角白化的 0.2019 升到块白化的 0.3267，约 +62%。输出 MSE 约降一半。
     reading: 子空间白化的输出 MSE 是对角白化的大约一半，脚本能分出块内结构。交叉项 3.3% 和 0.5% 只说明没有跨块结构时交叉项很小；这点差别多半是 32 条样本的噪声被更大的 ΔW 放大，不是跨块协方差。块白化是否接近对角白化，要等真实激活。
   reverse_control:
-    purpose: 证明交叉项诊断能测出跨块误差。只有这里的 |cross%| 明显变大，真实激活上的 |cross%| 才能用来决定要不要加大 d_sub，或先做一次全局旋转。
+    purpose: 只留一个大潜变量，看交叉项会不会变大。它变大了，但三步检查里的残差相关仍然在独立底上。不能用这个占比决定 d_sub。
     data: 合成。64 维里只留一个标准差为 8 的潜变量，其余为 0.05，再左乘一个全局正交阵。十六个同样大的潜变量混开后，量化残差的交叉项会抵消；各向同性噪声再旋转，Σ 仍接近单位阵。样本内，n=32。同一套权重。
     sigma_off_block_energy: 0.904
     unquantized_cross_share: -30.761
     whiten: {small_row_relative: 0.2031, output_mse: 0.0191, within_share: 1.353, cross_share: -0.353}
-    reading: Σ 的跨块能量占 90.4%。不量化时交叉项和块内部分几乎对消，占比可以远超过 100%。块白化之后交叉项占 -35.3%，绝对值明显大于块间独立时的 3.3%。这项诊断能看到跨块结构。
+    reading: 一个大潜变量时，块白化的交叉项占 -35.3%。这是残差被同一方向绑在一起的特例，不能证明交叉项诊断在一般 PQ 残差上能看见跨块结构。
+  three_step:
+    script: scripts/cross_block_diag.py
+    definition: ① ||Σ 的非对角块|| / ||Σ||；② 块白化后 Σ 的非对角块最大绝对值；③ 残差各列相关矩阵的非对角块绝对值平均。
+    null_resid: 128 行独立残差的 |相关系数| 期望大约是 0.07。
+    axis: {off_energy: 0.578, max_canon: 0.603, resid_cross: 0.072, cross_share: -0.022}
+    many: {off_energy: 0.880, max_canon: 0.848, resid_cross: 0.070, output_mse: 1.2613, cross_share: -0.016}
+    one: {off_energy: 0.951, max_canon: 0.887, resid_cross: 0.066, output_mse: 0.0191, cross_share: -0.353}
+    reading: 坐标独立时 ① 已有 0.578，因为 n=32 的非对角条目多，估计噪声会进 Frobenius 范数。全局旋转后 many 是 0.880、one 是 0.951，旋转作用在 X 上。三组的 ③ 都在 0.07 附近，是残差独立的底，不是跨块结构。many 的交叉项 -1.6% 就是各块残差求和后抵消，不能说明块对角近似没有损失。损失改用 full_whiten 和块白化的输出 MSE 差距来量。

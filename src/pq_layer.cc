@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <numeric>
 #include <random>
@@ -308,7 +309,7 @@ void fill_error_split(const Matrix& weight, const Matrix& recon, const Matrix& a
 }
 
 Report run_case(const Matrix& weight, const Matrix& activation, bool row_norm, bool whiten, int centroids_per_sub,
-                bool diagonal) {
+                bool diagonal, Matrix* recon_out = nullptr) {
     const int n = weight.rows;
     const int kdim = weight.cols;
     const int m = kdim / kDsub;
@@ -393,6 +394,9 @@ Report run_case(const Matrix& weight, const Matrix& activation, bool row_norm, b
     report.weight_rel_small = rel;
     report.output_mse = out_mse;
     fill_error_split(weight, recon, activation, &report);
+    if (recon_out != nullptr) {
+        *recon_out = recon;
+    }
     return report;
 }
 
@@ -511,9 +515,10 @@ void random_orthogonal_n(std::mt19937* rng, int n, std::vector<double>* q) {
     }
 }
 
-Matrix cross_block_activation(int tokens, int cols, std::mt19937* rng) {
-    // 反向对照。只留一个大的潜变量，其余坐标很小，再左乘一个 64 维全局正交阵。
-    // 十六个同样大的潜变量混开后，量化残差的交叉项会抵消。各向同性噪声再旋转，Σ 仍接近单位阵。
+Matrix cross_block_activation(int tokens, int cols, std::mt19937* rng, bool one_large) {
+    // 先按坐标缩放潜变量，再左乘全局正交阵。旋转必须作用在 X 上。
+    // one_large：只有第 0 个潜变量是 8，其余是 0.05。
+    // 否则每 4 个坐标里有一个是 8。各向同性噪声再旋转，Σ 仍接近单位阵。
     std::vector<double> q;
     random_orthogonal_n(rng, cols, &q);
     Matrix x = make_matrix(tokens, cols);
@@ -521,7 +526,7 @@ Matrix cross_block_activation(int tokens, int cols, std::mt19937* rng) {
     std::vector<double> latent(static_cast<size_t>(cols));
     for (int t = 0; t < tokens; ++t) {
         for (int c = 0; c < cols; ++c) {
-            const double scale = (c == 0) ? 8.0 : 0.05;
+            const double scale = one_large ? (c == 0 ? 8.0 : 0.05) : ((c % kDsub == 0) ? 8.0 : 0.05);
             latent[static_cast<size_t>(c)] = scale * unit(*rng);
         }
         for (int row = 0; row < cols; ++row) {
@@ -888,7 +893,8 @@ int main(int argc, char** argv) {
 
     const Report raw = run_case(weight, activation, false, false, kCentroids, false);
     const Report rows = run_case(weight, activation, true, false, kCentroids, false);
-    const Report white = run_case(weight, activation, false, true, kCentroids, false);
+    Matrix axis_recon;
+    const Report white = run_case(weight, activation, false, true, kCentroids, false, &axis_recon);
     const Report both = run_case(weight, activation, true, true, kCentroids, false);
     const Report diag = run_case(weight, activation, false, true, kCentroids, true);
 
@@ -948,7 +954,7 @@ int main(int argc, char** argv) {
     std::printf("阳性对照的块与块独立。交叉项占比的差别多半是 32 条样本的噪声被更大的误差放大，不是跨块结构。\n");
 
     std::mt19937 cross_rng(31);
-    const Matrix crossed = cross_block_activation(kTokens, kCols, &cross_rng);
+    const Matrix crossed = cross_block_activation(kTokens, kCols, &cross_rng, true);
     {
         const int tokens = crossed.rows;
         const int cols = crossed.cols;
@@ -979,7 +985,8 @@ int main(int argc, char** argv) {
         std::printf("反向对照的 Σ：跨块能量 %.1f%%。不量化时，用原权重算出的交叉项占比 %.1f%%。\n",
                     100.0 * (total - within) / total, 100.0 * plain_share);
     }
-    const Report cross_white = run_case(weight, crossed, false, true, kCentroids, false);
+    Matrix one_recon;
+    const Report cross_white = run_case(weight, crossed, false, true, kCentroids, false, &one_recon);
     const double cross_share = cross_white.cross_mse / std::max(std::fabs(cross_white.output_mse), 1e-30);
     std::printf("反向对照：一个大潜变量、其余坐标很小，再乘一个全局正交阵。样本内，n=%d。\n", kTokens);
     std::printf("%-16s %14.4f %14.4f\n", "子空间白化", cross_white.weight_rel_small, cross_white.output_mse);
@@ -988,6 +995,31 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "全局混合后块白化的交叉项占比没有明显变大，这项诊断还不能用来决定子空间大小\n");
         return 1;
     }
-    std::printf("反向对照成立：有跨块结构时，块白化的交叉项占比明显大于块间独立的阳性对照。\n");
+    std::printf("这是一个大潜变量的特例。十六个大潜变量时交叉项仍会接近零，不能用这个占比决定子空间大小。\n");
+    std::mt19937 many_rng(31);
+    const Matrix many = cross_block_activation(kTokens, kCols, &many_rng, false);
+    Matrix many_recon;
+    const Report many_white = run_case(weight, many, false, true, kCentroids, false, &many_recon);
+    const double many_share = many_white.cross_mse / std::max(std::fabs(many_white.output_mse), 1e-30);
+    std::printf("十六个大潜变量再全局旋转：块白化输出 MSE %.4f，交叉项占比 %.1f%%。\n", many_white.output_mse,
+                100.0 * many_share);
+    if (argc == 3 && std::strcmp(argv[1], "--dump-cross") == 0) {
+        const std::string dir = argv[2];
+        const std::string mkdir_cmd = "mkdir -p " + dir + "/axis " + dir + "/one " + dir + "/many";
+        if (std::system(mkdir_cmd.c_str()) != 0) {
+            std::fprintf(stderr, "无法建立 %s\n", dir.c_str());
+            return 1;
+        }
+        dump_matrix((dir + "/axis/W.bin").c_str(), weight);
+        dump_matrix((dir + "/axis/X.bin").c_str(), activation);
+        dump_matrix((dir + "/axis/recon.bin").c_str(), axis_recon);
+        dump_matrix((dir + "/one/W.bin").c_str(), weight);
+        dump_matrix((dir + "/one/X.bin").c_str(), crossed);
+        dump_matrix((dir + "/one/recon.bin").c_str(), one_recon);
+        dump_matrix((dir + "/many/W.bin").c_str(), weight);
+        dump_matrix((dir + "/many/X.bin").c_str(), many);
+        dump_matrix((dir + "/many/recon.bin").c_str(), many_recon);
+        std::printf("已写出三组 W、X、重建：%s\n", dir.c_str());
+    }
     return 0;
 }

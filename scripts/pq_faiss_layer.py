@@ -366,6 +366,33 @@ def whitening_factors(sigma: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.nda
     return evecs, sqrt_e, 1.0 / sqrt_e
 
 
+FULL_WHITEN_MIN_TOKENS = 256
+
+
+def full_whiten_status(n_tokens: int, width: int) -> dict:
+    needed = max(FULL_WHITEN_MIN_TOKENS, width)
+    if n_tokens < needed:
+        return {
+            "ran": False,
+            "needed_tokens": needed,
+            "reason": (
+                f"完整 Σ 是 {width}×{width}，校准样本 {n_tokens}。"
+                f"样本数少于 {needed} 时，求逆主要由 ε 决定，不跑 full_whiten。"
+            ),
+        }
+    return {"ran": True, "needed_tokens": needed, "reason": ""}
+
+
+def full_matrix_factors(second: np.ndarray, eps_rel: float = 1e-6) -> tuple[np.ndarray, np.ndarray]:
+    width = second.shape[0]
+    eps = eps_rel * float(np.trace(second)) / width
+    evals, evecs = np.linalg.eigh(second + eps * np.eye(width))
+    evals = np.clip(evals, eps, None)
+    sqrt_m = (evecs * np.sqrt(evals)) @ evecs.T
+    inv_m = (evecs * (1.0 / np.sqrt(evals))) @ evecs.T
+    return sqrt_m, inv_m
+
+
 def diagonal_factors(sigma: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """只用 Σ 的对角元做逐通道缩放，不做块内旋转。"""
     groups = sigma.shape[0]
@@ -553,6 +580,7 @@ def quantize_matrix(weight, activation, *, niter, seed, mse_tokens, min_points, 
         print(f"  {name}  小行相对误差 {rel:.4f}  输出 MSE {mse:.4f}", flush=True)
     spectrum["eval_tokens"] = int(indices.size)
     spectrum["eval_is_subset_of_calibration"] = True
+    spectrum["full_whiten"] = full_whiten_status(int(activation.shape[0]), int(activation.shape[1]))
     return reports, int(min_used), int(indices.size), spectrum
 
 
@@ -595,6 +623,9 @@ def render_report(payload: dict) -> str:
             + ("，评估集是校准集的子集" if block.get("eval_is_subset_of_calibration") else "")
         )
         summary = block.get("spectrum_summary")
+        full = block.get("full_whiten")
+        if full and not full.get("ran"):
+            lines.append(full["reason"])
         if summary:
             def num(key: str) -> str:
                 value = summary.get(key)
@@ -694,6 +725,7 @@ def run_real(args) -> int:
                 "min_points_per_centroid": min_used,
                 "sample_note": sample_note(int(weight.shape[0]), min_used),
                 "spectrum_summary": spectrum["summary"],
+                "full_whiten": spectrum["full_whiten"],
                 "blocks": spectrum["blocks"],
                 "cases": cases,
             }
@@ -828,6 +860,16 @@ def run_self_check(args) -> int:
         fail("复测记录缺每块的 eps/λmin")
     if spectrum["eval_tokens"] != used or spectrum["calibration_tokens"] != 64:
         fail("校准样本数和评估样本数没有分开记")
+    if spectrum["full_whiten"]["ran"]:
+        fail("64 条样本不该跑完整白化")
+    held = np.random.default_rng(0)
+    probe = held.normal(size=(300, 8))
+    probe[:, 0] *= 8.0
+    moment = probe.T @ probe / len(probe)
+    moment = 0.5 * (moment + moment.T)
+    sqrt_m, inv_m = full_matrix_factors(moment)
+    vector = held.normal(size=8)
+    _assert_close(inv_m @ (sqrt_m @ vector), vector, "完整白化往返")
     payload = {
         "scale": "interface_self_check",
         "full_size": False,
@@ -853,6 +895,7 @@ def run_self_check(args) -> int:
                 "eval_is_subset_of_calibration": True,
                 "min_points_per_centroid": 1,
                 "spectrum_summary": spectrum["summary"],
+                "full_whiten": spectrum["full_whiten"],
                 "blocks": spectrum["blocks"],
                 "sample_note": "接口自检把 min_points_per_centroid 设为 1，全尺寸运行不会这样做。",
                 "cases": cases,
