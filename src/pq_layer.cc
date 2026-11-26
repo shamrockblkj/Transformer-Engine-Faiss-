@@ -175,6 +175,8 @@ void kmeans(const std::vector<double>& points, int n, int k, std::vector<double>
 struct Report {
     double weight_rel_small = 0.0;
     double output_mse = 0.0;
+    double within_mse = 0.0;
+    double cross_mse = 0.0;
 };
 
 struct Prepared {
@@ -184,7 +186,7 @@ struct Prepared {
     bool whiten = false;
 };
 
-Prepared prepare_work(const Matrix& weight, const Matrix& activation, bool row_norm, bool whiten) {
+Prepared prepare_work(const Matrix& weight, const Matrix& activation, bool row_norm, bool whiten, bool diagonal) {
     Prepared prep;
     prep.whiten = whiten;
     const int n = weight.rows;
@@ -225,7 +227,18 @@ Prepared prepare_work(const Matrix& weight, const Matrix& activation, bool row_n
                     sigma[a][b] /= activation.rows;
                 }
             }
-            prep.bases[static_cast<size_t>(s)] = basis_from_sigma(sigma);
+            if (diagonal) {
+                SubspaceBasis basis;
+                for (int i = 0; i < 4; ++i) {
+                    basis.q[i][i] = 1.0;
+                    const double ev = std::max(sigma[i][i], kEigenFloor);
+                    basis.sqrt_scale[i] = std::sqrt(ev);
+                    basis.inv_sqrt_scale[i] = 1.0 / basis.sqrt_scale[i];
+                }
+                prep.bases[static_cast<size_t>(s)] = basis;
+            } else {
+                prep.bases[static_cast<size_t>(s)] = basis_from_sigma(sigma);
+            }
             for (int r = 0; r < n; ++r) {
                 double v[4];
                 double out[4];
@@ -266,11 +279,40 @@ Matrix restore_work(const Matrix& coded, const Prepared& prep) {
     return out;
 }
 
-Report run_case(const Matrix& weight, const Matrix& activation, bool row_norm, bool whiten, int centroids_per_sub) {
+void fill_error_split(const Matrix& weight, const Matrix& recon, const Matrix& activation, Report* report) {
+    const int n = weight.rows;
+    const int m = weight.cols / kDsub;
+    const int tokens = activation.rows;
+    double within = 0.0;
+    double total = 0.0;
+    for (int t = 0; t < tokens; ++t) {
+        for (int r = 0; r < n; ++r) {
+            double sum = 0.0;
+            double within_row = 0.0;
+            for (int s = 0; s < m; ++s) {
+                double dot = 0.0;
+                for (int d = 0; d < 4; ++d) {
+                    const int c = s * 4 + d;
+                    dot += (weight.at(r, c) - recon.at(r, c)) * activation.at(t, c);
+                }
+                within_row += dot * dot;
+                sum += dot;
+            }
+            within += within_row;
+            total += sum * sum;
+        }
+    }
+    const double denom = static_cast<double>(tokens) * n;
+    report->within_mse = within / denom;
+    report->cross_mse = (total - within) / denom;
+}
+
+Report run_case(const Matrix& weight, const Matrix& activation, bool row_norm, bool whiten, int centroids_per_sub,
+                bool diagonal) {
     const int n = weight.rows;
     const int kdim = weight.cols;
     const int m = kdim / kDsub;
-    const Prepared prep = prepare_work(weight, activation, row_norm, whiten);
+    const Prepared prep = prepare_work(weight, activation, row_norm, whiten, diagonal);
     const Matrix& work = prep.work;
     const std::vector<double>& scale = prep.scale;
     const std::vector<SubspaceBasis>& bases = prep.bases;
@@ -350,6 +392,7 @@ Report run_case(const Matrix& weight, const Matrix& activation, bool row_norm, b
     Report report;
     report.weight_rel_small = rel;
     report.output_mse = out_mse;
+    fill_error_split(weight, recon, activation, &report);
     return report;
 }
 
@@ -696,7 +739,7 @@ int main(int argc, char** argv) {
         const Matrix weight = load_matrix(argv[2]);
         const Matrix activation = load_matrix(argv[3]);
         const bool row_norm = std::strcmp(argv[5], "rms") == 0;
-        const Prepared prep = prepare_work(weight, activation, row_norm, true);
+        const Prepared prep = prepare_work(weight, activation, row_norm, true, false);
         const std::string dir = argv[4];
         dump_matrix((dir + "/Wp.bin").c_str(), prep.work);
         save_state((dir + "/state.bin").c_str(), prep);
@@ -737,10 +780,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const Report raw = run_case(weight, activation, false, false, kCentroids);
-    const Report rows = run_case(weight, activation, true, false, kCentroids);
-    const Report white = run_case(weight, activation, false, true, kCentroids);
-    const Report both = run_case(weight, activation, true, true, kCentroids);
+    const Report raw = run_case(weight, activation, false, false, kCentroids, false);
+    const Report rows = run_case(weight, activation, true, false, kCentroids, false);
+    const Report white = run_case(weight, activation, false, true, kCentroids, false);
+    const Report both = run_case(weight, activation, true, true, kCentroids, false);
+    const Report diag = run_case(weight, activation, false, true, kCentroids, true);
 
     std::printf("单层 PQ 对照，行 %d，列 %d，子空间维 %d，每子空间质心 %d。\n", kRows, kCols, kDsub, kCentroids);
     std::printf("这是 128×64 算法自检，使用自制 k-means，不是 Faiss。不能当作 S3 或全尺寸结论。\n");
@@ -749,6 +793,20 @@ int main(int argc, char** argv) {
     std::printf("%-16s %14.4f %14.4f\n", "行 RMS", rows.weight_rel_small, rows.output_mse);
     std::printf("%-16s %14.4f %14.4f\n", "子空间白化", white.weight_rel_small, white.output_mse);
     std::printf("%-16s %14.4f %14.4f\n", "两者都用", both.weight_rel_small, both.output_mse);
+    std::printf("%-16s %14.4f %14.4f\n", "对角白化", diag.weight_rel_small, diag.output_mse);
+    auto print_split = [](const char* name, const Report& item) {
+        const double scale = std::max(std::fabs(item.output_mse), 1e-30);
+        std::printf("%s 输出误差分解：块内 %.4f（%.1f%%），交叉项 %.4f（%.1f%%）。样本内，n=32。\n", name,
+                    item.within_mse, 100.0 * item.within_mse / scale, item.cross_mse, 100.0 * item.cross_mse / scale);
+    };
+    print_split("原样", raw);
+    print_split("子空间白化", white);
+    print_split("对角白化", diag);
+    const double split_gap = std::fabs((white.within_mse + white.cross_mse) - white.output_mse);
+    if (split_gap > 1e-8 * std::max(white.output_mse, 1e-30)) {
+        std::fprintf(stderr, "块内部分加交叉项没有回到输出 MSE\n");
+        return 1;
+    }
 
     if (!(rows.weight_rel_small < raw.weight_rel_small)) {
         std::fprintf(stderr, "行 RMS 没有降低小行的相对误差\n");

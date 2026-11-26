@@ -1,7 +1,8 @@
 # PQ 消融契约。只约束 128×64 自检和此后的复测口径。
-# 0.4642 仍是单种子自制 k-means 的结果，不是 Faiss 全尺寸，不能判定 S3。
+# 0.4642 是样本内、n=32、单种子自制 k-means 的结果，不是 Faiss 全尺寸，不能判定 S3。
+# 评估集就是校准集。独立评估集的数字出来后再替换。
 
-status: 复测前核对已完成，六条路径的复测尚未执行
+status: 复测尚未执行。0.4642 已标成样本内、n=32。
 
 primary_metric:
   name: 输出 MSE
@@ -21,15 +22,26 @@ cost_metric:
 tradeoff:
   note: 白化改善整体输出，代价是小范数行变差
   why:
-    identity: 在 W' = W·Σ^{1/2} 的空间里，||ΔW'||_F^2 = E||ΔW·x||^2。Σ 用的是不减均值的 E[xx^T]。
-    implication: 白化空间里做 k-means，就是在直接压输出 MSE。1.2783 降到 0.4642，约 64%，和这个恒等式一致。
+    identity: 在块对角近似下，白化空间的 Frobenius 误差等于输出误差的块内部分；跨块协方差项不受控制。
+    full_matrix_only: "‖ΔW'‖_F^2 = E‖ΔW·x‖^2 要 Σ 是完整矩阵。现在是 16 个 4×4 的块对角 Σ，这个等式不成立。"
+    decomposition: "E‖ΔW·x‖^2 = Σ_b tr(ΔW_b Σ_bb ΔW_bᵀ) + 跨块交叉项。白化空间里的 k-means 只压前一项。"
+    scale: 输出 MSE 按行数和样本数取平均，和上面的量相差 1/n_rows，只是成正比。
+    implication: 1.2783 降到 0.4642 符合这个机制，但不能说它证明了完整矩阵上的恒等式。
     cost: 质心集中到激活能量大的方向。小行在弱方向上的分量分不到质心，所以小行相对误差上升。
     priority: 输出 MSE 优先。小行相对误差只作为代价报告，不能单独否决白化。
   single_seed_128x64:
+    design: 样本内、n=32。估计 Σ 和计算输出 MSE 用的是同一 32 条激活。
     raw:        {small_row_relative: 0.1979, output_mse: 1.2783}
     row_rms:    {small_row_relative: 0.1933, output_mse: 1.2672}
     whiten:     {small_row_relative: 0.2043, output_mse: 0.4642}
     both:       {small_row_relative: 0.2260, output_mse: 0.4602}
+    diag_whiten: {small_row_relative: 0.2043, output_mse: 0.4630}
+    error_split:
+      raw:    {within_mse: 1.3002, within_share: 1.017, cross_mse: -0.0219, cross_share: -0.017}
+      whiten: {within_mse: 0.4743, within_share: 1.022, cross_mse: -0.0101, cross_share: -0.022}
+      diag_whiten: {within_mse: 0.4737, within_share: 1.023, cross_mse: -0.0108, cross_share: -0.023}
+    diag_reading: 对角白化的 0.4630 和块白化的 0.4642 几乎相同，块内旋转在这批数据上没有收益。这批激活每个坐标独立生成，方差就在坐标轴上，所以这个对照是预期结果。真实激活上若对角白化明显差于 4×4 块白化，才说明块内协方差有贡献。
+    cross_reading: 子空间白化的交叉项约占输出误差的 -2.2%，块内部分略大于输出误差。占比不大。坐标独立时交叉项本来就接近噪声。真实激活上若交叉项占比不小，块对角白化还有空间，可以加大子空间，或先做一次全局旋转。
 
 whitening:
   layout: 权重按行存放。量化前对每个 4 维子向量做 W' = W Σ^{1/2}
@@ -104,9 +116,9 @@ condition_numbers:
     upper_bound: ε ≤ 1e-6·λmax。条件数 6.564e4 时，ε/λmin 的上界约 6.5%。
     measured_max: 1.641e-2
     measured_median: 1.058e-2
-    why_below_the_bound: 一块里有一个大特征值时，tr/4 大约是 λmax/4，所以实际抬高约 1.6%，小于 6.5% 的上界。
+    tied_to_condition: ε/λmin ≈ 1e-6 × 条件数 / 4。最大条件数 6.564e4 约为 1.64%，中位 4.231e4 约为 1.06%，与实测一致。ε/λmin 由条件数决定，不必再单独找原因。
     truncated_blocks: 0
-    reading: 没有触发截断。1.6% 已经会动弱方向，所以每块记 ε/λmin，不记成是或否。
+    reading: 没有触发截断。比例由条件数决定，每块仍记 ε/λmin，不记成是或否。
   absolute_floor:
     value: 1.0e-8
     role: 产生 0.4642 的代码用这个绝对下限。它和相对 ε 分开记。
@@ -119,9 +131,11 @@ retest:
     - 行 RMS
     - 子空间白化
     - 两者都用
+    - 对角白化
     - OPQMatrix
     - PCAMatrix(eigen_power=-0.5)
-  path_count: 6
+  path_count: 7
+  diag_whiten: 只用 Σ 的对角元做逐通道缩放，不做 4×4 旋转。接近块白化就说明旋转没起作用；明显更差就说明块内协方差有贡献。
   kmeans_seeds_per_path: 5
   report: 每条路径报均值和标准差
   sigma_source: 独立校准集，几百到几千条，估计后固定
@@ -136,5 +150,6 @@ retest:
     - condition_centered
   record_counts: [calibration_tokens, eval_tokens]
   condition_centered_role: 只诊断，不改白化，不改输出 MSE 的口径
-  shared_sigma: 六条路径里需要 Σ 的，共用同一份校准估计
-  this_128x64_counts: {calibration_tokens: 32, eval_tokens: 32, eval_is_subset_of_calibration: true}
+  error_split: 每条路径另记块内部分和跨块交叉项占实际输出误差的比例。交叉项可以为负。
+  shared_sigma: 需要 Σ 的路径共用同一份校准估计
+  this_128x64_counts: {calibration_tokens: 32, eval_tokens: 32, eval_is_subset_of_calibration: true, label: 样本内、n=32}

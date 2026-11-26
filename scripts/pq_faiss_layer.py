@@ -366,6 +366,17 @@ def whitening_factors(sigma: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.nda
     return evecs, sqrt_e, 1.0 / sqrt_e
 
 
+def diagonal_factors(sigma: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """只用 Σ 的对角元做逐通道缩放，不做块内旋转。"""
+    groups = sigma.shape[0]
+    eye = np.zeros((groups, DSUB, DSUB), dtype=np.float64)
+    index = np.arange(DSUB)
+    eye[:, index, index] = 1.0
+    diag = np.maximum(np.diagonal(sigma, axis1=-2, axis2=-1), EIGEN_FLOOR)
+    sqrt_e = np.sqrt(diag)
+    return eye, sqrt_e, 1.0 / sqrt_e
+
+
 def apply_subspace(matrix: np.ndarray, evecs: np.ndarray, scales: np.ndarray) -> np.ndarray:
     rows, cols = matrix.shape
     groups = cols // DSUB
@@ -397,6 +408,38 @@ def small_row_relative(weight: np.ndarray, hat: np.ndarray) -> tuple[float, int]
     err = np.linalg.norm(weight[chosen] - hat[chosen], axis=1)
     rel = err / np.maximum(norms[chosen], 1e-8)
     return float(np.mean(rel)), int(take)
+
+
+def output_error_split(weight: np.ndarray, hat: np.ndarray, activation: np.ndarray, indices: np.ndarray) -> dict:
+    """把输出误差拆成块内部分和跨块交叉项。交叉项可以为负。"""
+    delta = np.asarray(weight - hat, dtype=np.float64)
+    rows, cols = delta.shape
+    groups = cols // DSUB
+    delta_view = np.ascontiguousarray(delta.reshape(rows, groups, DSUB))
+    within = 0.0
+    total = 0.0
+    count = 0
+    bytes_per = rows * groups * 8
+    step = max(1, min(32, (256 * 1024 * 1024) // max(bytes_per, 1)))
+    for cursor in range(0, indices.size, step):
+        chosen = indices[cursor : cursor + step]
+        block = np.asarray(activation[chosen], dtype=np.float64).reshape(-1, groups, DSUB)
+        dots = np.einsum("bgi,rgi->brg", block, delta_view, optimize=True)
+        total += float(np.sum(np.square(dots.sum(axis=2)), dtype=np.float64))
+        within += float(np.sum(np.square(dots), dtype=np.float64))
+        count += int(dots.shape[0] * dots.shape[1])
+    if count == 0:
+        fail("没有可用于误差分解的 token")
+    within_mse = within / count
+    cross_mse = (total - within) / count
+    output = within_mse + cross_mse
+    share = (lambda part: None if output == 0.0 else part / output)
+    return {
+        "within_mse": within_mse,
+        "cross_mse": cross_mse,
+        "within_share": share(within_mse),
+        "cross_share": share(cross_mse),
+    }
 
 
 def output_mse(weight: np.ndarray, hat: np.ndarray, activation: np.ndarray, indices: np.ndarray) -> float:
@@ -465,11 +508,15 @@ def quantize_matrix(weight, activation, *, niter, seed, mse_tokens, min_points, 
     sigma = second_moment(activation)
     spectrum = block_diagnostics(activation)
     evecs, sqrt_scales, inv_scales = whitening_factors(sigma)
+    diag_evecs, diag_sqrt, diag_inv = diagonal_factors(sigma)
     rms = row_rms(weight)
     indices = mse_indices(activation.shape[0], mse_tokens)
     reports = []
     min_used = MIN_POINTS_DEFAULT
-    for name, use_rms, use_whiten in CASES:
+    jobs = [(name, use_rms, use_whiten, False) for name, use_rms, use_whiten in CASES]
+    jobs.append(("对角白化", False, True, True))
+    for name, use_rms, use_whiten, use_diagonal in jobs:
+        factors = (diag_evecs, diag_sqrt, diag_inv) if use_diagonal else (evecs, sqrt_scales, inv_scales)
         print(f"  训练 {name}，niter={niter}，seed={seed}", flush=True)
         started = time.perf_counter()
         work = prepare_work(
@@ -477,15 +524,16 @@ def quantize_matrix(weight, activation, *, niter, seed, mse_tokens, min_points, 
             use_rms,
             use_whiten,
             rms,
-            evecs,
-            sqrt_scales,
+            factors[0],
+            factors[1],
         )
         _codes, decoded, min_used = faiss_reconstruct(work, niter, seed, min_points)
-        hat = restore(decoded, use_rms, use_whiten, rms, evecs, inv_scales)
+        hat = restore(decoded, use_rms, use_whiten, rms, factors[0], factors[2])
         if not np.isfinite(hat).all():
             fail(f"{name} 的重建含有非有限数")
         rel, take = small_row_relative(weight, hat)
         mse = output_mse(weight, hat, activation, indices)
+        split = output_error_split(weight, hat, activation, indices)
         elapsed = time.perf_counter() - started
         reports.append(
             {
@@ -495,6 +543,9 @@ def quantize_matrix(weight, activation, *, niter, seed, mse_tokens, min_points, 
                 "small_row_relative": rel,
                 "small_row_count": take,
                 "output_mse": mse,
+                "within_share": split["within_share"],
+                "cross_share": split["cross_share"],
+                "diagonal_whiten": use_diagonal,
                 "train_seconds": elapsed,
                 "full_size": full_size,
             }
@@ -564,6 +615,10 @@ def render_report(payload: dict) -> str:
             lines.append(
                 f"{item['name']:<12} {item['small_row_relative']:14.4f} {item['output_mse']:14.4f}"
             )
+            if item.get("within_share") is not None:
+                lines.append(
+                    f"  块内 {item['within_share']:.1%}，交叉项 {item['cross_share']:.1%}"
+                )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -760,8 +815,11 @@ def run_self_check(args) -> int:
         min_points=1,
         full_size=False,
     )
-    if [item["name"] for item in cases] != [name for name, _rms, _whiten in CASES]:
-        fail("四组没有写全")
+    names = [item["name"] for item in cases]
+    if names[:4] != [name for name, _rms, _whiten in CASES] or "对角白化" not in names:
+        fail("四组没有写全，或缺少对角白化")
+    if any(item.get("within_share") is None or item.get("cross_share") is None for item in cases):
+        fail("误差分解没有写下块内部分和交叉项")
     if any(not np.isfinite(item["small_row_relative"]) or not np.isfinite(item["output_mse"]) for item in cases):
         fail("自检指标不是有限数")
     if used < 1:
