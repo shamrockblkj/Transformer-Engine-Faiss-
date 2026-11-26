@@ -40,8 +40,8 @@ tradeoff:
       raw:    {within_mse: 1.3002, within_share: 1.017, cross_mse: -0.0219, cross_share: -0.017}
       whiten: {within_mse: 0.4743, within_share: 1.022, cross_mse: -0.0101, cross_share: -0.022}
       diag_whiten: {within_mse: 0.4737, within_share: 1.023, cross_mse: -0.0108, cross_share: -0.023}
-    diag_reading: 对角白化的 0.4630 和块白化的 0.4642 几乎相同，块内旋转在这批数据上没有收益。这批激活每个坐标独立生成，方差就在坐标轴上，所以这个对照是预期结果。真实激活上若对角白化明显差于 4×4 块白化，才说明块内协方差有贡献。
-    cross_reading: 子空间白化的交叉项约占输出误差的 -2.2%，块内部分略大于输出误差。占比不大。坐标独立时交叉项本来就接近噪声。真实激活上若交叉项占比不小，块对角白化还有空间，可以加大子空间，或先做一次全局旋转。
+    diag_reading: 0.4630 和 0.4642 几乎相同，小行相对误差都是 0.2043，交叉项都约 -2.2%。坐标独立时每个 4×4 的 Σ 基本是对角阵，非对角只是 32 条样本的估计噪声，所以 Σ^{1/2} 和逐通道 √E[x²] 几乎相同。这只说明两条路径算法一致，说明不了块内结构有没有用。
+    cross_reading: 坐标独立时交叉项本来就接近噪声。真实激活上若交叉项占比不小，块对角白化还有空间，可以加大子空间，或先做一次全局旋转。
 
 whitening:
   layout: 权重按行存放。量化前对每个 4 维子向量做 W' = W Σ^{1/2}
@@ -101,7 +101,8 @@ sigma:
 
 condition_numbers:
   accepted_next_issue: 往返已经通过。接下来记条件数，不改 0.4642 的口径。
-  systematic: 16 块全部病态，不是个别块。原始 λmax/λmin 最大 6.564e4，中位 4.231e4，最小 2.165e4。随机激活的中位数大约只有 63。
+  source: 坐标独立的合成自检，不是 Llama 3 8B 的激活。不能拿来当作模型激活的病态程度。
+  systematic: 这批合成数据的 16 块全部病态，不是个别块。原始 λmax/λmin 最大 6.564e4，中位 4.231e4，最小 2.165e4。另一批各向同性随机激活的中位数大约只有 63，那也是合成的。
   centering_diagnostic:
     changes_the_metric: false
     reason: 对输出误差，不减均值的二阶矩是正确的量。减均值协方差只用来对照条件数。
@@ -110,13 +111,13 @@ condition_numbers:
       centered_median: 4.162e4
       centered_max: 6.626e4
       centered_min: 2.191e4
-      finding: 这 32 条上，减均值没有把条件数降下来。能量在一个坐标的方差里，不在公共均值里。真实 LLM 激活仍要留这条诊断，因为公共均值或离群方向可能只出现在那里。
+      finding: 减均值没有把条件数降下来。能量在某一个坐标的方差里，是生成方式造成的：该坐标乘了 8，其余乘了 0.05。这不是 Llama 3 8B 的特征。真实激活仍要留减均值诊断，因为公共均值或离群方向可能只出现在那里。
   relative_eps:
     definition: ε = 1.0e-6 * tr(Σ) / 4
     upper_bound: ε ≤ 1e-6·λmax。条件数 6.564e4 时，ε/λmin 的上界约 6.5%。
     measured_max: 1.641e-2
     measured_median: 1.058e-2
-    tied_to_condition: ε/λmin ≈ 1e-6 × 条件数 / 4。最大条件数 6.564e4 约为 1.64%，中位 4.231e4 约为 1.06%，与实测一致。ε/λmin 由条件数决定，不必再单独找原因。
+    tied_to_condition: 仍是这批合成自检。ε/λmin ≈ 1e-6 × 条件数 / 4。最大条件数 6.564e4 约为 1.64%，中位 4.231e4 约为 1.06%，与实测一致。ε/λmin 由条件数决定，不必再单独找原因。
     truncated_blocks: 0
     reading: 没有触发截断。比例由条件数决定，每块仍记 ε/λmin，不记成是或否。
   absolute_floor:
@@ -153,3 +154,9 @@ retest:
   error_split: 每条路径另记块内部分和跨块交叉项占实际输出误差的比例。交叉项可以为负。
   shared_sigma: 需要 Σ 的路径共用同一份校准估计
   this_128x64_counts: {calibration_tokens: 32, eval_tokens: 32, eval_is_subset_of_calibration: true, label: 样本内、n=32}
+  positive_control:
+    purpose: 独立评估集出来之前，先确认脚本能分出块白化和对角白化。若这种数据上两者仍接近，问题在脚本或 pq_layer，不在数据。
+    data: 合成。每个 4 维块先给潜变量标准差 8、0.05、0.05、0.05，再左乘该块自己的随机正交阵。块与块之间仍然独立。样本内，n=32。同一套权重。
+    whiten: {small_row_relative: 0.3267, output_mse: 0.5175, within_share: 0.967, cross_share: 0.033}
+    diag_whiten: {small_row_relative: 0.2019, output_mse: 1.0450, within_share: 0.995, cross_share: 0.005}
+    reading: 子空间白化的输出 MSE 是对角白化的大约一半。交叉项占比 3.3% 和 0.5%，分开了。块与块仍独立，所以交叉项都不大；能分开的是量化误差和这 32 条样本里的残差交叉，不是模型里的跨块协方差。以后在真实激活上看到两条路径接近，才可以当作真实结论。

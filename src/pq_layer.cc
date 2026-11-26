@@ -418,12 +418,66 @@ Matrix small_row_weights(int rows, int cols, std::mt19937* rng) {
 }
 
 Matrix ill_conditioned_activation(int tokens, int cols, std::mt19937* rng) {
+    // 合成自检：每个坐标独立，第 0 个坐标方差大。不是 Llama 3 8B 的激活。
     Matrix x = make_matrix(tokens, cols);
     std::normal_distribution<double> unit(0.0, 1.0);
     for (int t = 0; t < tokens; ++t) {
         for (int c = 0; c < cols; ++c) {
             const double scale = (c % kDsub == 0) ? 8.0 : 0.05;
             x.at(t, c) = scale * unit(*rng);
+        }
+    }
+    return x;
+}
+
+void random_orthogonal(std::mt19937* rng, double q[4][4]) {
+    std::normal_distribution<double> normal(0.0, 1.0);
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            q[row][col] = normal(*rng);
+        }
+        for (int prev = 0; prev < col; ++prev) {
+            double dot = 0.0;
+            for (int row = 0; row < 4; ++row) {
+                dot += q[row][col] * q[row][prev];
+            }
+            for (int row = 0; row < 4; ++row) {
+                q[row][col] -= dot * q[row][prev];
+            }
+        }
+        double norm = 0.0;
+        for (int row = 0; row < 4; ++row) {
+            norm += q[row][col] * q[row][col];
+        }
+        norm = std::sqrt(norm);
+        for (int row = 0; row < 4; ++row) {
+            q[row][col] /= norm;
+        }
+    }
+}
+
+Matrix block_correlated_activation(int tokens, int cols, std::mt19937* rng) {
+    // 阳性对照。先在潜变量上给不同方差，再左乘该块的随机正交阵。
+    // 先旋转各向同性噪声、再按观测坐标缩放，得到的仍是对角 Σ，分不出两条路径。
+    Matrix x = make_matrix(tokens, cols);
+    std::normal_distribution<double> unit(0.0, 1.0);
+    const double latent_scale[4] = {8.0, 0.05, 0.05, 0.05};
+    const int subspaces = cols / kDsub;
+    for (int s = 0; s < subspaces; ++s) {
+        double q[4][4];
+        random_orthogonal(rng, q);
+        for (int t = 0; t < tokens; ++t) {
+            double latent[4];
+            for (int d = 0; d < 4; ++d) {
+                latent[d] = latent_scale[d] * unit(*rng);
+            }
+            for (int row = 0; row < 4; ++row) {
+                double value = 0.0;
+                for (int col = 0; col < 4; ++col) {
+                    value += q[row][col] * latent[col];
+                }
+                x.at(t, s * 4 + row) = value;
+            }
         }
     }
     return x;
@@ -817,5 +871,27 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("对照成立：行 RMS 降低小行相对误差，子空间白化降低输出 MSE。\n");
+    std::printf("上面的条件数和 0.4630、0.4642 来自坐标独立的合成激活，不是 Llama 3 8B。\n");
+
+    std::mt19937 corr_rng(29);
+    const Matrix correlated = block_correlated_activation(kTokens, kCols, &corr_rng);
+    const Report corr_white = run_case(weight, correlated, false, true, kCentroids, false);
+    const Report corr_diag = run_case(weight, correlated, false, true, kCentroids, true);
+    std::printf("阳性对照：每个 4 维块先给潜变量不同方差，再乘随机正交阵。样本内，n=%d。\n", kTokens);
+    std::printf("%-16s %14.4f %14.4f\n", "子空间白化", corr_white.weight_rel_small, corr_white.output_mse);
+    std::printf("%-16s %14.4f %14.4f\n", "对角白化", corr_diag.weight_rel_small, corr_diag.output_mse);
+    print_split("阳性对照 子空间白化", corr_white);
+    print_split("阳性对照 对角白化", corr_diag);
+    if (!(corr_white.output_mse < corr_diag.output_mse * 0.8)) {
+        std::fprintf(stderr, "块内相关时子空间白化没有明显优于对角白化，问题在脚本或 pq_layer\n");
+        return 1;
+    }
+    const double white_cross = corr_white.cross_mse / std::max(std::fabs(corr_white.output_mse), 1e-30);
+    const double diag_cross = corr_diag.cross_mse / std::max(std::fabs(corr_diag.output_mse), 1e-30);
+    if (!(std::fabs(white_cross - diag_cross) > 0.02)) {
+        std::fprintf(stderr, "块内相关时两条路径的交叉项占比没有分开，问题在脚本或 pq_layer\n");
+        return 1;
+    }
+    std::printf("阳性对照成立：块内相关时，子空间白化优于对角白化，交叉项占比也分开了。\n");
     return 0;
 }
