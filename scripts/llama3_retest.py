@@ -12,6 +12,8 @@
   块白化 ε 固定 1e-6；低秩完整白化 ε 在校准集内选（前 3/4 估 Σ、后 1/4 挑选），r = 高于 ε 的特征值个数
   首 token：incl / excl 两种口径都报
   判定：低秩对块白化的配对差值 > 3 个配对标准误；不足时自动加到 --seeds-ext 个种子再判
+  r 扫描：r > r_eff 且 z 落在 [1, 6) 时，这张权重的种子加到 --seeds-ext，两项判定重算
+  最终种子数少于 --min-seeds（默认 5）时不判通过也不判不通过
 
 示例
   # 正式复测。层和位置按契约，默认 5 个种子，不够再加到 20。
@@ -531,37 +533,61 @@ def analyze_position(cal, ev, Ws, cfg, excl):
                         if p == "lowrank":
                             contrib_per_w[nm] += (((Wh - W) @ V) ** 2).sum(0) * q / len(seeds)
         if final:
-            # 配对判定；不足 3 个标准误时加种子。rho 的贡献改按全部种子平均。
+            # 配对判定和 r 扫描共用 extend。种子编号记在 used_seeds，不从列表长度反推。
             ent["paired_lowrank_vs_block"] = {}
-            used_seeds = {}
-            for nm, W in Ws.items():
-                pr = paired(ent["mse"][nm]["block"], ent["mse"][nm]["lowrank"])
-                used_seeds[nm] = list(seeds)
-                if abs(pr["z"]) < 3 and len(seeds) < cfg.seeds_ext:
-                    n_old, n_new = len(seeds), cfg.seeds_ext
-                    contrib_per_w[nm] *= n_old / n_new
-                    for s in range(n_old, n_new):
-                        for p in ("block", "lowrank"):
-                            Wh = recon(p, W, ctx, s, cfg)
-                            ent["mse"][nm][p].append(mse_S(W, Wh, Se))
-                            ent["small_row_err"][nm][p].append(small_row_err(W, Wh))
-                            if p == "lowrank":
-                                contrib_per_w[nm] += (((Wh - W) @ V) ** 2).sum(0) * q / n_new
-                    used_seeds[nm] = list(range(n_new))
-                    pr = paired(ent["mse"][nm]["block"], ent["mse"][nm]["lowrank"])
-                    pr["extended"] = True
-                ent["paired_lowrank_vs_block"][nm] = pr
-            # r 扫描。种子和这张权重的配对判定相同：加到 20 个才用 20 个。
+            used_seeds = {nm: list(seeds) for nm in Ws}
             rs = sorted({max(1, L.r // 2), L.r, 2 * L.r, 4 * L.r} & set(range(1, d + 1))) or [1]
-            ent["r_scan"] = {}
-            for nm, W in Ws.items():
-                ws_ = used_seeds[nm]
-                base = ent["mse"][nm]["lowrank"][:len(ws_)]
+            lo, hi = cfg.r_ext_band
+
+            def extend(nm, W):
+                used = used_seeds[nm]
+                extra = [s for s in range(cfg.seeds_ext) if s not in used]
+                if not extra:
+                    return
+                n_old, n_new = len(used), len(used) + len(extra)
+                contrib_per_w[nm] *= n_old / n_new
+                for s in extra:
+                    for pth in ("block", "lowrank"):
+                        Wh = recon(pth, W, ctx, s, cfg)
+                        ent["mse"][nm][pth].append(mse_S(W, Wh, Se))
+                        ent["small_row_err"][nm][pth].append(small_row_err(W, Wh))
+                        if pth == "lowrank":
+                            contrib_per_w[nm] += (((Wh - W) @ V) ** 2).sum(0) * q / n_new
+                    used.append(s)
+
+            def paired_now(nm):
+                pr = paired(ent["mse"][nm]["block"], ent["mse"][nm]["lowrank"])
+                if len(used_seeds[nm]) != len(ent["mse"][nm]["lowrank"]):
+                    raise RuntimeError(f"{nm} 的种子编号和 lowrank MSE 条数对不齐")
+                if len(used_seeds[nm]) > len(seeds):
+                    pr["extended"] = True
+                pr["seeds"] = list(used_seeds[nm])
+                return pr
+
+            def rscan(nm, W):
+                used = used_seeds[nm]
+                base = ent["mse"][nm]["lowrank"]
                 rows = []
                 for r in rs:
                     Lr = LowRank(wn, Vn, eps, r)
-                    m_ = [mse_S(W, recon("lowrank", W, {"lowrank": Lr}, s, cfg), Se) for s in ws_]
+                    m_ = [mse_S(W, recon("lowrank", W, {"lowrank": Lr}, s, cfg), Se) for s in used]
                     rows.append(dict(r=r, **ms(m_), vs_r_eff=paired(base, m_)))
+                return rows
+
+            ent["r_scan"] = {}
+            for nm, W in Ws.items():
+                pr = paired_now(nm)
+                if math.isfinite(pr["z"]) and abs(pr["z"]) < 3:
+                    extend(nm, W)
+                    pr = paired_now(nm)
+                rows = rscan(nm, W)
+                z_hot = any(row["r"] > L.r and math.isfinite(row["vs_r_eff"]["z"])
+                            and lo <= row["vs_r_eff"]["z"] < hi for row in rows)
+                if (len(used_seeds[nm]) < cfg.min_seeds or z_hot) and len(used_seeds[nm]) < cfg.seeds_ext:
+                    extend(nm, W)
+                    pr = paired_now(nm)
+                    rows = rscan(nm, W)
+                ent["paired_lowrank_vs_block"][nm] = pr
                 ent["r_scan"][nm] = rows
             # rho：各权重按残差能量相加，不是等权。种子加过之后，上面已按全部种子重新平均。
             contrib = sum(contrib_per_w.values())
@@ -596,12 +622,20 @@ def analyze_position(cal, ev, Ws, cfg, excl):
     out["min_cal_mult"] = dict(block=pick("block"), lowrank=pick("lowrank"))
 
     f = out["final"]
-    z_ok = all(p["z"] > 3 for p in f["paired_lowrank_vs_block"].values())
-    r_ok = all(row["vs_r_eff"]["z"] <= 3 for rows in f["r_scan"].values()
-               for row in rows if row["r"] > f["r"])
-    out["verdict"] = dict(lowrank_beats_block=z_ok, r_no_increase=r_ok,
-                          eps_not_at_edge=not f["at_edge"],
-                          lowrank_pass=bool(z_ok and r_ok and not f["at_edge"]))
+    n_seeds = {nm: len(pr["seeds"]) for nm, pr in f["paired_lowrank_vs_block"].items()}
+    short = min(n_seeds.values()) if n_seeds else 0
+    if short < cfg.min_seeds:
+        out["verdict"] = dict(lowrank_beats_block=None, r_no_increase=None,
+                              eps_not_at_edge=not f["at_edge"], lowrank_pass=float("nan"),
+                              n_seeds=n_seeds, reason=f"种子数 {short} < {cfg.min_seeds}")
+    else:
+        z_ok = all(p["z"] > 3 for p in f["paired_lowrank_vs_block"].values())
+        r_ok = all(row["vs_r_eff"]["z"] <= 3 for rows in f["r_scan"].values()
+                   for row in rows if row["r"] > f["r"])
+        out["verdict"] = dict(lowrank_beats_block=z_ok, r_no_increase=r_ok,
+                              eps_not_at_edge=not f["at_edge"],
+                              lowrank_pass=bool(z_ok and r_ok and not f["at_edge"]),
+                              n_seeds=n_seeds)
     return out
 
 
@@ -656,6 +690,8 @@ def make_cfg(args):
     return argparse.Namespace(
         d_sub=args.d_sub, k=args.k, niter=args.niter, block_eps=1e-6, eps_grid=EPS_GRID,
         seeds=range(args.seeds), seeds_ext=args.seeds_ext, select_seeds=range(args.select_seeds),
+        min_seeds=getattr(args, "min_seeds", 5),
+        r_ext_band=tuple(getattr(args, "r_ext_band", (1.0, 6.0))),
         weak_tau=1e-3, cal_tol_rel=args.cal_tol_rel, cal_tol_se=args.cal_tol_se,
         first_modes=[{"incl": False, "excl": True}[m] for m in args.first_token])
 
@@ -732,6 +768,9 @@ def main(argv=None):
         p.add_argument("--cal-tol-rel", type=float, default=0.01, help="校准倍数判据：相对最大档 MSE 增幅上限")
         p.add_argument("--cal-tol-se", type=float, default=2.0, help="校准倍数判据：配对标准误倍数上限")
         p.add_argument("--seeds", type=int, default=5); p.add_argument("--seeds-ext", type=int, default=20)
+        p.add_argument("--min-seeds", type=int, default=5, help="少于此数不判通过也不判不通过")
+        p.add_argument("--r-ext-band", type=float, nargs=2, default=[1.0, 6.0], metavar=("LO", "HI"),
+                       help="r > r_eff 且 z 落在 [LO, HI) 时把种子加到 --seeds-ext")
         p.add_argument("--select-seeds", type=int, default=2, help="选 ε 时每档用的种子数")
         p.add_argument("--first-token", nargs="+", default=["incl", "excl"], choices=["incl", "excl"])
         p.add_argument("--spike-thr", type=float, default=10)
