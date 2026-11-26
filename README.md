@@ -17,6 +17,14 @@ python3 scripts/gate0_host.py --list
 
 `make test` 只做查表索引对拍，以及 128×64 的自制 k-means 算法自检。那个自检不是 Faiss，不能当作 S3。口径和复测矩阵在 [contract/pq_ablation.yaml](contract/pq_ablation.yaml)。
 
+白化往返检查不经过量化。先导出和自检同一份矩阵，再跑脚本。`weight_rel_ok` 要小于 1e-10：
+
+```bash
+mkdir -p /tmp/pq_wx
+./pq_layer --dump-wx /tmp/pq_wx
+python3 scripts/whiten_roundtrip_check.py --w /tmp/pq_wx/W.bin --x /tmp/pq_wx/X.bin
+```
+
 `pq_faiss_layer.py --self-check` 只确认 faiss-cpu 1.16.0 的 `train` / `compute_codes` 接口。输出里的误差来自缩小随机矩阵。
 
 ## 测量主机

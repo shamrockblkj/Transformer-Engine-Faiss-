@@ -2,8 +2,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <numeric>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace {
@@ -435,9 +437,27 @@ WhitenCheck check_whiten(const Matrix& activation) {
     return out;
 }
 
+void dump_matrix(const char* path, const Matrix& m) {
+    std::FILE* file = std::fopen(path, "wb");
+    if (file == nullptr) {
+        std::fprintf(stderr, "无法写出 %s\n", path);
+        std::exit(1);
+    }
+    const std::int32_t rows = m.rows;
+    const std::int32_t cols = m.cols;
+    const bool ok = std::fwrite(&rows, sizeof(rows), 1, file) == 1 &&
+                    std::fwrite(&cols, sizeof(cols), 1, file) == 1 &&
+                    std::fwrite(m.v.data(), sizeof(double), m.v.size(), file) == m.v.size();
+    std::fclose(file);
+    if (!ok) {
+        std::fprintf(stderr, "写出 %s 失败\n", path);
+        std::exit(1);
+    }
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     constexpr int kRows = 128;
     constexpr int kCols = 64;
     constexpr int kTokens = 32;
@@ -445,6 +465,12 @@ int main() {
     std::mt19937 rng(11);
     const Matrix weight = small_row_weights(kRows, kCols, &rng);
     const Matrix activation = ill_conditioned_activation(kTokens, kCols, &rng);
+    if (argc == 3 && std::strcmp(argv[1], "--dump-wx") == 0) {
+        const std::string dir = argv[2];
+        dump_matrix((dir + "/W.bin").c_str(), weight);
+        dump_matrix((dir + "/X.bin").c_str(), activation);
+        std::printf("已写出与 128×64 自检相同的 W 和 X：%s\n", argv[2]);
+    }
     const WhitenCheck whiten = check_whiten(activation);
     std::printf("白化往返：不经量化，最大绝对误差 %.3e。\n", whiten.roundtrip);
     std::printf("前向核对：||Σ^{1/2} v||^2 与 v^T Σ v 的最大相对差 %.3e。\n", whiten.direction);

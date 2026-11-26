@@ -37,6 +37,18 @@ whitening:
     statement: "||Σ^{1/2} v||^2 与 v^T Σ v 一致，前向不是 Σ^{-1/2}"
     max_relative: 5.442e-15
     passed: true
+  python_roundtrip:
+    script: scripts/whiten_roundtrip_check.py
+    data: 与 128×64 自检同一块 W 和同一 32 条 X
+    order: 行 RMS，再 W' = W Σ^{1/2}，不量化，乘 Σ^{-1/2}，乘回行尺度
+    pass_bar: weight_rel_ok < 1.0e-10
+    weight_rel_ok: 1.049e-15
+    weight_rel_wrong: 3.053e+01
+    out_mse_ok: 5.204e-27
+    out_mse_wrong: 9.843e+07
+    passed: true
+    raw_sigma_max_block_cond: 6.564e+04
+    note: 不量化时行尺度会消掉，行 RMS 开或关的往返数字相同。最差 4×4 块条件数约 6.6e4，ε 和估计质量仍会在量化后放大弱方向误差。
 
 sigma:
   shape: 每个子空间一个 4×4 块
