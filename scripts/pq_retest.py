@@ -134,6 +134,7 @@ def fair_compare(W, X_cal, X_eval, d_sub=4, k=8, seeds=range(5)):
         out[path] = dict(
             eps=eps, at_edge=edge, curve=curve,
             oos_mean=float(np.mean(scores)), oos_std=float(np.std(scores, ddof=1)),
+            oos_scores=scores,
             **rho_stats(W, hats, X_cal, X_eval, eps),
         )
     raw = [out_mse(W, pq_reconstruct(W, d_sub, k, seed), X_eval) for seed in seeds]
@@ -204,7 +205,7 @@ def run_case(title, weight, calib, eval_act, seeds):
         print(
             f"  评估集 {_fmt(item['oos_mean'], item['oos_std'])}。"
             f"rho 中位 {item['rho_median']:.3f}，最大 {item['rho_max']:.3f}，"
-            f"五种子贡献平均后加权 {item['rho_weighted']:.3f}，各种子加权的标准差 {item['rho_seed_std']:.3f}。"
+            f"各种子贡献平均后加权 {item['rho_weighted']:.3f}，各种子加权的标准差 {item['rho_seed_std']:.3f}。"
         )
         if item["at_edge"] and item["curve"][-1][1] < item["curve"][-2][1]:
             print("  曲线到网格右端还在降，ε 已经大到改变方法本身，这一档先不下结论。")
@@ -223,6 +224,68 @@ def run_case(title, weight, calib, eval_act, seeds):
         f"仍高于 ε 的特征值 {profile['n_above_eps']} 个。"
     )
     return result
+
+
+def low_rank_recon(weight, activation, eps_rel, rank, seed, d_sub=4, k=8):
+    """固定 ε，只把前 rank 个里被抬平的方向改回各自的特征值。
+
+    rank 不超过高于 ε 的个数时，结果和完整白化相同。
+    """
+    matrix = np.asarray(activation, dtype=np.float64)
+    second = matrix.T @ matrix / len(matrix)
+    second = 0.5 * (second + second.T)
+    eigenvalues, vectors = np.linalg.eigh(second)
+    eigenvalues = np.clip(eigenvalues, 0, None)
+    floor = eps_rel * eigenvalues.sum() / len(eigenvalues)
+    used = eigenvalues + floor
+    keep = np.zeros(len(eigenvalues), dtype=bool)
+    keep[-rank:] = True
+    unshrink = keep & (eigenvalues < floor)
+    used[unshrink] = np.maximum(eigenvalues[unshrink], 1e-12)
+    forward = (vectors * np.sqrt(used)) @ vectors.T
+    inverse = (vectors * used**-0.5) @ vectors.T
+    return pq_reconstruct(np.asarray(weight, dtype=np.float64) @ forward, d_sub, k, seed) @ inverse
+
+
+def print_precision(result):
+    """种子数变多时，单个种子的标准差不缩小。显著性看标准误和配对差值。"""
+    block = np.asarray(result["block"]["oos_scores"], dtype=np.float64)
+    full = np.asarray(result["full"]["oos_scores"], dtype=np.float64)
+    count = len(block)
+    diff = block - full
+    se_block = block.std(ddof=1) / np.sqrt(count)
+    se_full = full.std(ddof=1) / np.sqrt(count)
+    combined = float(np.sqrt(se_block**2 + se_full**2))
+    lead = float(diff.mean())
+    print(
+        f"均值的标准误：块白化 {se_block:.4f}，完整白化 {se_full:.4f}，"
+        f"合并 {combined:.4f}。领先 {lead:.4f} 是合并标准误的 {lead / combined:.1f} 倍。"
+    )
+    print(
+        f"同一组 k-means 种子上，块白化减去完整白化：均值 {lead:.4f}，"
+        f"标准差 {diff.std(ddof=1):.4f}。{count} 个种子里完整白化赢了 {int(np.sum(diff > 0))} 次。"
+    )
+    print("标准差之和不随种子数变小，不能拿 20 个种子的倍数去和 5 个种子的倍数比。")
+
+
+def print_rank_scan(weight, calib, eval_act, eps, ranks, seeds):
+    """r 比高于 ε 的个数更大时，多出来的方向不再抬平。"""
+    print(f"固定 ε={eps:.0e}，比较 r={list(ranks)}。r 等于高于 ε 的个数时，就是这一档 ε 本身。")
+    scores = {}
+    for rank in ranks:
+        one = np.array([
+            out_mse(weight, low_rank_recon(weight, calib, eps, rank, seed), eval_act)
+            for seed in seeds
+        ])
+        scores[rank] = one
+        print(f"  r={rank} 评估集 {_fmt(float(one.mean()), float(one.std(ddof=1)))}。")
+    base = scores[ranks[0]]
+    for rank in ranks[1:]:
+        delta = base - scores[rank]
+        print(
+            f"  r={ranks[0]} 减 r={rank}：均值 {delta.mean():+.4f}，标准差 {delta.std(ddof=1):.4f}。"
+            f"r={rank} 更好 {int(np.sum(delta > 0))} 次，更差 {int(np.sum(delta < 0))} 次。"
+        )
 
 
 def main() -> int:
@@ -249,13 +312,18 @@ def main() -> int:
             seeds,
         )
     graded, _ = np.linalg.qr(np.random.default_rng(49).standard_normal((cols, cols)))
-    run_case(
-        "8 个潜变量再跑 20 个种子。五种子那组的块白化标准差最大，领先只有标准差之和的 1.4 倍。",
+    calib = scaled_pair(256, cols, latent_scales(cols, 8), graded, np.random.default_rng(111))
+    eval_act = scaled_pair(256, cols, latent_scales(cols, 8), graded, np.random.default_rng(222))
+    extra_seeds = range(20)
+    extra = run_case(
+        "8 个潜变量再跑 20 个种子。五种子那组的块白化标准差最大。标准差之和不随种子数变小。",
         weight,
-        scaled_pair(256, cols, latent_scales(cols, 8), graded, np.random.default_rng(111)),
-        scaled_pair(256, cols, latent_scales(cols, 8), graded, np.random.default_rng(222)),
-        range(20),
+        calib,
+        eval_act,
+        extra_seeds,
     )
+    print_precision(extra)
+    print_rank_scan(weight, calib, eval_act, 1e-1, (5, 8, 16), extra_seeds)
     return 0
 
 
