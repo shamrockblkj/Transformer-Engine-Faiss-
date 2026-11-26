@@ -14,11 +14,15 @@
   判定：低秩对块白化的配对差值 > 3 个配对标准误；不足时自动加到 --seeds-ext 个种子再判
 
 示例
+  # 正式复测。层和位置按契约，默认 5 个种子，不够再加到 20。
   python llama3_retest.py collect --model meta-llama/Meta-Llama-3-8B \
       --cal cal.jsonl --eval eval.jsonl --layers 1 15 --positions attn_in o_in mlp_in --out runs/
   python llama3_retest.py analyze --stats runs/ --d-sub 4 --k 256
   python llama3_retest.py selftest
-正式判定用默认的 5 个种子，不够再加到 20。把种子降到 2、选 ε 只用 1 个种子，只说明流程能跑完，不能据此采纳低秩。
+  # 流程摸底：只看能不能跑完，不能据此采纳低秩。
+  python llama3_retest.py collect --model meta-llama/Meta-Llama-3-8B \
+      --cal cal.jsonl --eval eval.jsonl --layers 15 --positions mlp_in --mult 1 --out smoke/
+  python llama3_retest.py analyze --stats smoke/ --seeds 2 --select-seeds 1
 cal.jsonl / eval.jsonl：每行一个 {"text": ...}，两份文件的文档互不重叠（按文档切分，不按 token）。
 """
 import argparse, glob, json, math, os, sys, time, warnings
@@ -248,8 +252,11 @@ def collect(args):
             np.savez(os.path.join(args.out, f"L{l}_{pos}_weights.npz"), **ws)
 
     def docs(path):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
+                line = line.strip()
+                if not line:
+                    continue
                 t = json.loads(line).get("text", "")
                 if t.strip():
                     yield t
@@ -313,7 +320,7 @@ def collect(args):
                 lambda token, tok=tok: tok.decode([int(token)], clean_up_tokenization_spaces=False))
             print(f"L{l}_{pos} {split} 尖峰情况 {entry[split]['case']}，pos 0 占比 {entry[split]['pos0_share']}")
         report["positions"][f"L{l}_{pos}"] = entry
-    with open(os.path.join(args.out, "spike_report.json"), "w") as f:
+    with open(os.path.join(args.out, "spike_report.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=1)
     print("保存到", args.out)
 
@@ -509,7 +516,8 @@ def analyze_position(cal, ev, Ws, cfg, excl):
         if final:
             weak = w < cfg.weak_tau * w.max()
             q = (V * (Se @ V)).sum(0)
-            contrib = np.zeros(d); ent["small_row_err"] = {}
+            contrib_per_w = {nm: np.zeros(d) for nm in Ws}
+            ent["small_row_err"] = {}
         for nm, W in Ws.items():
             ent["mse"][nm] = {p: [] for p in paths}
             if final:
@@ -521,18 +529,22 @@ def analyze_position(cal, ev, Ws, cfg, excl):
                     if final:
                         ent["small_row_err"][nm][p].append(small_row_err(W, Wh))
                         if p == "lowrank":
-                            contrib += (((Wh - W) @ V) ** 2).sum(0) * q / len(seeds)
+                            contrib_per_w[nm] += (((Wh - W) @ V) ** 2).sum(0) * q / len(seeds)
         if final:
-            # 配对判定；不足 3 个标准误时加种子
+            # 配对判定；不足 3 个标准误时加种子。rho 的贡献改按全部种子平均。
             ent["paired_lowrank_vs_block"] = {}
             for nm, W in Ws.items():
                 pr = paired(ent["mse"][nm]["block"], ent["mse"][nm]["lowrank"])
                 if abs(pr["z"]) < 3 and len(seeds) < cfg.seeds_ext:
-                    for s in range(len(seeds), cfg.seeds_ext):
+                    n_old, n_new = len(seeds), cfg.seeds_ext
+                    contrib_per_w[nm] *= n_old / n_new
+                    for s in range(n_old, n_new):
                         for p in ("block", "lowrank"):
                             Wh = recon(p, W, ctx, s, cfg)
                             ent["mse"][nm][p].append(mse_S(W, Wh, Se))
                             ent["small_row_err"][nm][p].append(small_row_err(W, Wh))
+                            if p == "lowrank":
+                                contrib_per_w[nm] += (((Wh - W) @ V) ** 2).sum(0) * q / n_new
                     pr = paired(ent["mse"][nm]["block"], ent["mse"][nm]["lowrank"])
                     pr["extended"] = True
                 ent["paired_lowrank_vs_block"][nm] = pr
@@ -547,7 +559,8 @@ def analyze_position(cal, ev, Ws, cfg, excl):
                     m_ = [mse_S(W, recon("lowrank", W, {"lowrank": Lr}, s, cfg), Se) for s in seeds]
                     rows.append(dict(r=r, **ms(m_), vs_r_eff=paired(base, m_)))
                 ent["r_scan"][nm] = rows
-            # rho
+            # rho：各权重按残差能量相加，不是等权。种子加过之后，上面已按全部种子重新平均。
+            contrib = sum(contrib_per_w.values())
             rho = q / np.maximum(w, 1e-300)
             if weak.any():
                 cw = contrib[weak]
@@ -627,7 +640,7 @@ def analyze(args):
             res = analyze_position(cal, ev, Ws, cfg, excl)
             print_report(name, res)
             allres[f"{name}_{res['first_token']}"] = res
-    with open(os.path.join(args.stats, "retest_results.json"), "w") as f:
+    with open(os.path.join(args.stats, "retest_results.json"), "w", encoding="utf-8") as f:
         json.dump(allres, f, indent=1, default=float)
     write_spike_report(args.stats, args.spike_thr)
     passed = {k: v["verdict"]["lowrank_pass"] for k, v in allres.items()}
@@ -659,7 +672,7 @@ def write_spike_report(stats_dir, thr):
         if entry:
             report["positions"][name] = entry
     if found:
-        with open(os.path.join(stats_dir, "spike_report.json"), "w") as handle:
+        with open(os.path.join(stats_dir, "spike_report.json"), "w", encoding="utf-8") as handle:
             json.dump(report, handle, ensure_ascii=False, indent=1)
 
 
