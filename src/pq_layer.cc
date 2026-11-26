@@ -353,7 +353,7 @@ int main() {
     const Report both = run_case(weight, activation, true, true, kCentroids);
 
     std::printf("单层 PQ 对照，行 %d，列 %d，子空间维 %d，每子空间质心 %d。\n", kRows, kCols, kDsub, kCentroids);
-    std::printf("这是算法对照，不是 Llama 3 8B 的全尺寸 k-means。\n");
+    std::printf("这是 128×64 算法自检，使用自制 k-means，不是 Faiss。不能当作 S3 或全尺寸结论。\n");
     std::printf("%-16s %14s %14s\n", "路径", "小行相对误差", "输出 MSE");
     std::printf("%-16s %14.4f %14.4f\n", "原样", raw.weight_rel_small, raw.output_mse);
     std::printf("%-16s %14.4f %14.4f\n", "行 RMS", rows.weight_rel_small, rows.output_mse);

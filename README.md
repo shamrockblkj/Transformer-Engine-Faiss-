@@ -1,22 +1,63 @@
 # Transformer Engine 与 Faiss
 
-方案正文是 [Transformer Engine 与 Faiss 混合压缩及推理优化方案V2.6_修订稿.md](Transformer%20Engine%20与%20Faiss%20混合压缩及推理优化方案V2.6_修订稿.md)。当前批准的是第 1 周的判定实验，不是全量解码内核。
+方案正文是 [Transformer Engine 与 Faiss 混合压缩及推理优化方案V2.6_修订稿.md](Transformer%20Engine%20与%20Faiss%20混合压缩及推理优化方案V2.6_修订稿.md)。
 
-`src/` 里是这两项实验的 C++ 实现：
+第 1 周三件事同时准备，不按一周日历往下排。全量 CUDA 解码内核仍未批准。测量主机是晨涧云 RTX 4090 48G（sm_89）。这台云端机器没有 GPU、没有 nvcc、没有 Llama 3 8B 权重，不能在这里计时，也不能把接口自检写成全尺寸结论。
 
-- `gather_ref` 检查全局查表和 SMEM 切片查表的索引是否一致，并打印 1.2 ms/token 停机线对应的查找率。它不测量 GPU 时间。
-- `gather_bench.cu` 在 Hopper 上用 CUDA 事件对比这两条路径，并把 `gate` 的耗时按查找次数外推到整个 FFN。
-- `pq_layer` 在一块缩小的单层权重上对比四种离线路径：原样、按行 RMS、按 4 维子空间白化、两者都用。指标是小行相对误差和输出 MSE。
+1.2 ms/token 只是方案里 H100 的原文口径，不是 4090 的停线。S2 阈值留空，要用同卡的 TE FP8 DelayedScaling 重标定。
+
+## 云端可以跑的自检
 
 ```bash
 make test
+python3 -m pip install -r requirements-pq.txt
+python3 scripts/pq_faiss_layer.py --self-check
+python3 scripts/gate0_host.py --list
 ```
 
-有 NVCC 和 Hopper GPU 时：
+`make test` 只做查表索引对拍，以及 128×64 的自制 k-means 算法自检。那个自检不是 Faiss，不能当作 S3。
+
+`pq_faiss_layer.py --self-check` 只确认 faiss-cpu 1.16.0 的 `train` / `compute_codes` 接口。输出里的误差来自缩小随机矩阵。
+
+## 测量主机
+
+三件事可以同时开，不必串行。
+
+查表微基准。不要在云端编译：
 
 ```bash
 make gpu
 ./gather_bench
 ```
 
-全尺寸码本训练仍使用 Faiss 的 `ProductQuantizer`。这里的 k-means 只用来确认行尺度和子空间白化的方向，不代替 Faiss。
+`make gpu` 同时生成 sm_89 和 sm_90。4090 上若共享内存放不下方案正文里的 128 KB 切片，程序会改用放得下的 split，并写明这不是 H100 原文配置。打印出来的外推时间不能用来判断通过或不通过。
+
+单层全尺寸 PQ。权重放在测量主机，脚本不下载第二份：
+
+```bash
+python3 -m pip install -r requirements-pq.txt
+python3 scripts/pq_faiss_layer.py \
+    --weights /路径/Meta-Llama-3-8B \
+    --activations-dir /路径/校准激活 \
+    --layers 0 \
+    --out out/pq_layer0
+```
+
+激活文件是 C 顺序 npy，float32 或 float16：
+
+- `layer0.gate_up.npy`，形状 `[token 数, 4096]`
+- `layer0.down.npy`，形状 `[token 数, 14336]`
+
+四组都会写入 `out/pq_layer0/report.txt`：原样、行 RMS、子空间加权、两者都用。缩小自检里「两者都用」的小行相对误差是 0.2260，高于原样 0.1979；全尺寸报告也要四组都留。这一步不能判定 S3。
+
+Gate 0 基线不在云端测：
+
+```bash
+python3 scripts/gate0_host.py --check-env
+python3 scripts/gate0_host.py --execute --baseline bf16 \
+    --model-dir /路径/Meta-Llama-3-8B \
+    --prompts /路径/prompt.txt \
+    --out out/gate0
+```
+
+除 BF16 外要另给 `--quant-dir`。注意力 W4 + FFN 原方案还没有权重，脚本会拒绝测量。没有 GPU 时不会写出吞吐或 PPL。

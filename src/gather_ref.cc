@@ -116,9 +116,10 @@ int main() {
     const double lookups = static_cast<double>(shape.n_rows) * shape.n_subspaces;
     const double required = static_cast<double>(kFfnLookups) / (kGatherStopMs * 1e-3);
     std::printf("索引自检通过。样例查找 %g 次，两条路径结果一致。\n", lookups);
-    std::printf("全模型 FFN 查找次数 %lld。停机线 %.1f ms/token 要求查找率不低于 %.3e 次/秒。\n",
+    std::printf("全模型 FFN 查找次数 %lld。方案里 H100 原文口径 %.1f ms/token，对应查找率不低于 %.3e 次/秒。\n",
                 static_cast<long long>(kFfnLookups), kGatherStopMs, required);
-    std::printf("本机没有用于计时的 GPU。H100 上的耗时用 make gpu 编译 src/gather_bench.cu 后测量。\n");
+    std::printf("这不是 RTX 4090 的阈值。S2 阈值留空，须用同卡 TE FP8 DelayedScaling 重标定。\n");
+    std::printf("本机不编 CUDA、不计时。测量主机用 make gpu 编译 src/gather_bench.cu，默认包含 sm_89 和 sm_90。\n");
     std::printf("同一子空间内的随机码落在同一行，把 LUT 行距改成非 32 的倍数不能消除这次 bank conflict。\n");
     return 0;
 }

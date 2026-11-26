@@ -9,8 +9,10 @@
 #define GATHER_HD
 #endif
 
-// Llama 3 8B 的 FFN 参数量是 5,637,144,576。dsub = 4 时，每个参数对应一次查找。
+// Llama 3 8B 的 FFN 参数量是 5,637,144,576。dsub = 4 时，每 4 个参数一次查找。
 inline constexpr std::int64_t kFfnLookups = 5637144576LL / 4;
+// 方案正文给 H100 的原文口径，单位是毫秒/token。
+// 不是 RTX 4090 的停线。S2 必须用同卡 TE FP8 DelayedScaling 重标定，阈值留空。
 inline constexpr double kGatherStopMs = 1.2;
 
 // 码的交错布局是 [M / 16, N, 16]，每个 uint4 装 16 个码。
