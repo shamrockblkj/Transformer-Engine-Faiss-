@@ -70,91 +70,79 @@ def full_whiteners(X, eps_rel):
     return (V * w2**0.5) @ V.T, (V * w2**-0.5) @ V.T, w, V
 
 
-def oos_check(W, X_cal, X_eval, d_sub=4, k=8, seeds=range(5),
-              eps_list=(1e-6, 1e-4, 1e-3, 1e-2, 1e-1), weak_tau=1e-3):
-    rows = []
-    for eps in eps_list:
-        Shb, Sihb, _ = block_whiteners(X_cal, d_sub, eps)
-        Shf, Sihf, w, V = full_whiteners(X_cal, eps)
-        weak = w < weak_tau * w.max()
-        Se = X_eval.T @ X_eval / len(X_eval)
-        # 弱方向上 评估能量 / 校准能量：远大于 1 说明 Σ 弱方向估计不稳
-        rho = np.diag(V.T @ Se @ V)[weak] / np.maximum(w[weak], 1e-300)
-        Pw = V[:, weak] @ V[:, weak].T
-        for s in seeds:
-            Wb = apply_blocks(pq_reconstruct(apply_blocks(W, Shb, d_sub), d_sub, k, s), Sihb, d_sub)
-            Wf = pq_reconstruct(W @ Shf, d_sub, k, s) @ Sihf
-            for name, Wh in (("block", Wb), ("full", Wf)):
-                dW = Wh - W
-                tot = np.einsum("ij,jk,ik->", dW, Se, dW)
-                wk = np.einsum("ij,jk,ik->", dW @ Pw, Se, dW @ Pw)
-                energy = ((dW @ V) ** 2).sum(axis=0)
-                rho_all = np.diag(V.T @ Se @ V) / np.maximum(w, 1e-300)
-                weak_energy = float(energy[weak].sum()) if weak.any() else 0.0
-                rho_weighted = float((energy[weak] * rho_all[weak]).sum() / weak_energy) if weak_energy > 0.0 else np.nan
-                rows.append(dict(eps=eps, seed=s, path=name,
-                    mse_cal=out_mse(W, Wh, X_cal), mse_eval=out_mse(W, Wh, X_eval),
-                    weak_share_eval=wk / tot,           # 只取弱子空间那部分，不含它和强方向的交叉
-                    n_weak=int(weak.sum()),
-                    rho_median=float(np.median(rho)) if weak.any() else np.nan,
-                    rho_max=float(np.max(rho)) if weak.any() else np.nan,
-                    rho_weighted=rho_weighted))
-    return rows
+
+EPS_GRID = (1e-6, 1e-4, 1e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1.0, 3.0)
 
 
-def raw_rows(W, X_cal, X_eval, d_sub=4, k=8, seeds=range(5)):
-    rows = []
-    for seed in seeds:
-        hat = pq_reconstruct(W, d_sub, k, seed)
-        rows.append(dict(seed=seed, mse_cal=out_mse(W, hat, X_cal), mse_eval=out_mse(W, hat, X_eval)))
-    return rows
+def recon(path, W, Xfit, eps, d_sub, k, seed):
+    if path == "block":
+        Sh, Sih, _ = block_whiteners(Xfit, d_sub, eps)
+        Wq = pq_reconstruct(apply_blocks(W, Sh, d_sub), d_sub, k, seed)
+        return apply_blocks(Wq, Sih, d_sub)
+    if path == "full":
+        Shf, Sihf, _, _ = full_whiteners(Xfit, eps)
+        return pq_reconstruct(W @ Shf, d_sub, k, seed) @ Sihf
+    if path == "diag":
+        scale = np.sqrt(np.maximum(np.mean(np.asarray(Xfit, dtype=np.float64) ** 2, axis=0), 1e-12))
+        return pq_reconstruct(W * scale, d_sub, k, seed) / scale
+    raise ValueError(path)
 
 
-def _mean_std(values):
-    array = np.asarray(values, dtype=np.float64)
-    return float(array.mean()), float(array.std(ddof=1))
+def select_eps(path, W, X_cal, n_fit=192, grid=EPS_GRID, d_sub=4, k=8, seeds=range(5)):
+    """只用校准集：前 n_fit 条估计 Σ，其余条选 ε。返回选中的 ε 和整条曲线。"""
+    Xf, Xv = X_cal[:n_fit], X_cal[n_fit:]
+    curve = []
+    for eps in grid:
+        scores = [out_mse(W, recon(path, W, Xf, eps, d_sub, k, s), Xv) for s in seeds]
+        curve.append((eps, float(np.mean(scores)), float(np.std(scores, ddof=1))))
+    index = int(np.argmin([item[1] for item in curve]))
+    at_edge = index in (0, len(grid) - 1)  # 最优在网格端点：需要继续扩网格
+    return grid[index], curve, at_edge
 
 
-def summarize(rows):
-    grouped = {}
-    for row in rows:
-        grouped.setdefault((row["eps"], row["path"]), []).append(row)
-    stats = {}
-    for key, group in grouped.items():
-        cal_mean, cal_std = _mean_std([item["mse_cal"] for item in group])
-        eval_mean, eval_std = _mean_std([item["mse_eval"] for item in group])
-        weak_mean, weak_std = _mean_std([item["weak_share_eval"] for item in group])
-        weighted_mean, weighted_std = _mean_std([item["rho_weighted"] for item in group])
-        stats[key] = dict(
-            mse_cal=cal_mean, mse_cal_std=cal_std, mse_eval=eval_mean, mse_eval_std=eval_std,
-            weak_share=weak_mean, weak_share_std=weak_std,
-            rho_median=float(group[0]["rho_median"]), rho_max=float(group[0]["rho_max"]),
-            rho_weighted=weighted_mean, rho_weighted_std=weighted_std, n_weak=int(group[0]["n_weak"]),
+def rho_stats(W, Whs, X_cal, X_eval, eps, weak_tau=1e-3):
+    """rho 沿校准集 Σ 的特征向量。加权先把各种子的贡献求平均。"""
+    _, _, eigenvalues, vectors = full_whiteners(X_cal, eps)
+    second = X_eval.T @ X_eval / len(X_eval)
+    weak = eigenvalues < weak_tau * eigenvalues.max()
+    moment = np.diag(vectors.T @ second @ vectors)
+    rho = moment / np.maximum(eigenvalues, 1e-300)
+    hats = Whs if isinstance(Whs, (list, tuple)) else [Whs]
+    contrib = np.zeros(len(eigenvalues))
+    per_seed = []
+    for hat in hats:
+        one = (((hat - W) @ vectors) ** 2).sum(axis=0) * moment
+        contrib += one
+        per_seed.append(float((one[weak] * rho[weak]).sum() / one[weak].sum()))
+    contrib /= len(hats)
+    weak_contrib = contrib[weak]
+    return dict(
+        rho_median=float(np.median(rho[weak])),
+        rho_max=float(rho[weak].max()),
+        rho_weighted=float((weak_contrib * rho[weak]).sum() / weak_contrib.sum()),
+        rho_seed0=per_seed[0],
+        rho_seed_std=float(np.std(per_seed, ddof=1)) if len(per_seed) > 1 else 0.0,
+    )
+
+
+def fair_compare(W, X_cal, X_eval, d_sub=4, k=8, seeds=range(5)):
+    out = {}
+    for path in ("block", "full"):
+        eps, curve, edge = select_eps(path, W, X_cal, d_sub=d_sub, k=k, seeds=seeds)
+        hats = [recon(path, W, X_cal, eps, d_sub, k, seed) for seed in seeds]
+        scores = [out_mse(W, hat, X_eval) for hat in hats]
+        out[path] = dict(
+            eps=eps, at_edge=edge, curve=curve,
+            oos_mean=float(np.mean(scores)), oos_std=float(np.std(scores, ddof=1)),
+            **rho_stats(W, hats, X_cal, X_eval, eps),
         )
-    return stats
-
-
-def select_eps(W, X_cal, eps_list, d_sub=4, k=8, seeds=range(5), fit_count=192):
-    """Σ 用前 fit_count 条估计，ε 用剩下的校准条挑选。评估集不进入这个函数。"""
-    fit = X_cal[:fit_count]
-    held = X_cal[fit_count:]
-    chosen = []
-    for eps in eps_list:
-        Shb, Sihb, _ = block_whiteners(fit, d_sub, eps)
-        Shf, Sihf, _w, _V = full_whiteners(fit, eps)
-        block_scores = []
-        full_scores = []
-        for seed in seeds:
-            block = apply_blocks(pq_reconstruct(apply_blocks(W, Shb, d_sub), d_sub, k, seed), Sihb, d_sub)
-            full = pq_reconstruct(W @ Shf, d_sub, k, seed) @ Sihf
-            block_scores.append(out_mse(W, block, held))
-            full_scores.append(out_mse(W, full, held))
-        block_mean, block_std = _mean_std(block_scores)
-        full_mean, full_std = _mean_std(full_scores)
-        chosen.append(dict(eps=eps, block=block_mean, block_std=block_std, full=full_mean, full_std=full_std))
-    best_block = min(chosen, key=lambda item: item["block"])
-    best_full = min(chosen, key=lambda item: item["full"])
-    return chosen, best_block, best_full
+    raw = [out_mse(W, pq_reconstruct(W, d_sub, k, seed), X_eval) for seed in seeds]
+    out["raw"] = dict(oos_mean=float(np.mean(raw)), oos_std=float(np.std(raw, ddof=1)))
+    block_curve = out["block"]["curve"]
+    if out["block"]["at_edge"] and block_curve[-1][1] < block_curve[-2][1]:
+        diag = [out_mse(W, recon("diag", W, X_cal, 0.0, d_sub, k, seed), X_eval) for seed in seeds]
+        out["diag"] = dict(oos_mean=float(np.mean(diag)), oos_std=float(np.std(diag, ddof=1)))
+    return out
 
 
 def floor_report(activation, eps_rel, weak_tau=1e-3):
@@ -175,11 +163,6 @@ def floor_report(activation, eps_rel, weak_tau=1e-3):
         cond_floored=float(floored.max() / floored.min()),
         n_weak=int(weak.sum()), n_above_eps=int(np.sum(eigenvalues > eps)),
     )
-
-
-def _turns_up(values):
-    lowest = int(np.argmin(values))
-    return lowest not in (0, len(values) - 1)
 
 
 def scaled_pair(tokens, cols, scales, orthogonal, rng):
@@ -209,69 +192,42 @@ def _fmt(mean, std):
     return f"{mean:.4f} ± {std:.4f}"
 
 
-def run_case(title, weight, calib, eval_act, eps_list, seeds):
+def run_case(title, weight, calib, eval_act, seeds):
     print(f"\n{title}")
-    print("Σ 的诊断表用全部 256 条校准。ε 的挑选只用前 192 条估计、后 64 条打分，评估集不进入挑选。")
-    rows = oos_check(weight, calib, eval_act, seeds=seeds, eps_list=eps_list)
-    stats = summarize(rows)
-    raw = raw_rows(weight, calib, eval_act, seeds=seeds)
-    raw_cal, raw_cal_std = _mean_std([item["mse_cal"] for item in raw])
-    raw_eval, raw_eval_std = _mean_std([item["mse_eval"] for item in raw])
-    print(f"{'ε':>8} {'路径':<6} {'样本内':>18} {'样本外':>18} {'弱方向占比':>18} {'rho中位':>8} {'rho最大':>8} {'rho加权':>8}")
-    for eps in eps_list:
-        for path in ("block", "full"):
-            item = stats[(eps, path)]
-            print(
-                f"{eps:8.0e} {path:<6} {_fmt(item['mse_cal'], item['mse_cal_std']):>18} "
-                f"{_fmt(item['mse_eval'], item['mse_eval_std']):>18} "
-                f"{_fmt(item['weak_share'], item['weak_share_std']):>18} "
-                f"{item['rho_median']:8.3f} {item['rho_max']:8.3f} {item['rho_weighted']:8.3f}"
-            )
-    print(f"raw 不白化  样本内 {_fmt(raw_cal, raw_cal_std)}  样本外 {_fmt(raw_eval, raw_eval_std)}")
-    held_rows, best_block, best_full = select_eps(weight, calib, eps_list, seeds=seeds)
-    print("两条路径各自在后 64 条上选 ε：")
-    for item in held_rows:
-        print(f"  ε={item['eps']:.0e}  块白化 {_fmt(item['block'], item['block_std'])}  完整白化 {_fmt(item['full'], item['full_std'])}")
-    block_pick = stats[(best_block["eps"], "block")]
-    full_pick = stats[(best_full["eps"], "full")]
+    print("ε 用前 192 条估计 Σ、后 64 条挑选。192 条估计 64×64 比 256 条更噪，选出的 ε 偏大，用回 256 条是偏保守的。")
+    result = fair_compare(weight, calib, eval_act, seeds=seeds)
+    for path in ("block", "full"):
+        item = result[path]
+        print(f"{path} 选中 ε={item['eps']:.0e}，端点={item['at_edge']}。64 条上的曲线：")
+        for eps, mean, std in item["curve"]:
+            print(f"  ε={eps:.0e}  {_fmt(mean, std)}")
+        print(
+            f"  评估集 {_fmt(item['oos_mean'], item['oos_std'])}。"
+            f"rho 中位 {item['rho_median']:.3f}，最大 {item['rho_max']:.3f}，"
+            f"五种子贡献平均后加权 {item['rho_weighted']:.3f}，各种子加权的标准差 {item['rho_seed_std']:.3f}。"
+        )
+        if item["at_edge"] and item["curve"][-1][1] < item["curve"][-2][1]:
+            print("  曲线到网格右端还在降，ε 已经大到改变方法本身，这一档先不下结论。")
+    block = result["block"]
+    full = result["full"]
+    lead = block["oos_mean"] - full["oos_mean"]
+    spread = block["oos_std"] + full["oos_std"]
+    print(f"raw 评估集 {_fmt(result['raw']['oos_mean'], result['raw']['oos_std'])}。")
+    if "diag" in result:
+        print(f"对角白化评估集 {_fmt(result['diag']['oos_mean'], result['diag']['oos_std'])}。")
+    print(f"完整白化领先 {lead:.4f}，两边标准差之和 {spread:.4f}。{'领先超过种子波动。' if lead > spread else '领先没有超过两边标准差之和。'}")
+    profile = floor_report(calib, full["eps"])
     print(
-        f"块白化选中 ε={best_block['eps']:.0e}，完整白化选中 ε={best_full['eps']:.0e}。"
-        "下面的样本外数字是用全部 256 条重新估计 Σ 之后，在评估集上算的。"
-    )
-    print(f"  块白化样本外 {_fmt(block_pick['mse_eval'], block_pick['mse_eval_std'])}")
-    print(f"  完整白化样本外 {_fmt(full_pick['mse_eval'], full_pick['mse_eval_std'])}")
-    full_held = [item["full"] for item in held_rows]
-    full_eval = [stats[(eps, "full")]["mse_eval"] for eps in eps_list]
-    if best_full["eps"] == eps_list[-1]:
-        print("完整白化在 64 条上的最低点落在网格右端，样本外曲线也要看它有没有回头。")
-    if _turns_up(full_eval):
-        turn = eps_list[int(np.argmin(full_eval))]
-        print(f"完整白化的样本外 MSE 先降后升，最低在 ε={turn:.0e}。")
-    elif full_eval[-1] < full_eval[-2]:
-        print("完整白化的样本外 MSE 到网格右端还在降。")
-    if _turns_up(full_held):
-        turn = eps_list[int(np.argmin(full_held))]
-        print(f"64 条上完整白化先降后升，最低在 ε={turn:.0e}。")
-    elif full_held[-1] < full_held[-2]:
-        print("64 条上完整白化到网格右端还在降。")
-    profile = floor_report(calib, 1e-1)
-    print(
-        f"ε=1e-1：ε/λmax={profile['eps_over_lam']:.4f}，弱方向占迹 {profile['weak_trace_share']:.4f}，"
-        f"ε 是弱特征值均值的 {profile['eps_over_weak_mean']:.1f} 倍，抬平后条件数 {profile['cond_floored']:.1f}，"
+        f"完整白化选中的 ε={full['eps']:.0e}：ε/λmax={profile['eps_over_lam']:.4f}，"
+        f"弱方向占迹 {profile['weak_trace_share']:.4f}，抬平后条件数 {profile['cond_floored']:.1f}，"
         f"仍高于 ε 的特征值 {profile['n_above_eps']} 个。"
     )
-    base = stats[(eps_list[0], "full")]
-    print(
-        f"默认 ε 的完整白化：rho 中位 {base['rho_median']:.3f}，最大 {base['rho_max']:.3f}，"
-        f"按残差能量加权 {_fmt(base['rho_weighted'], base['rho_weighted_std'])}。"
-    )
-    return dict(stats=stats, raw_eval=raw_eval, raw_eval_std=raw_eval_std, best_block=best_block, best_full=best_full, profile=profile)
+    return result
 
 
 def main() -> int:
     cols = 64
     weight = small_row_weights(128, cols, np.random.default_rng(11))
-    eps_list = (1e-6, 1e-4, 1e-3, 1e-2, 1e-1, 0.3, 1.0, 3.0)
     seeds = range(5)
     print("numpy 种子，和 C++ 的 0.0216 / 0.0230 不是同一套实现。8 次迭代，5 个种子，标准差除以 4。")
     orthogonal, _ = np.linalg.qr(np.random.default_rng(31).standard_normal((cols, cols)))
@@ -281,18 +237,15 @@ def main() -> int:
         weight,
         scaled_pair(256, cols, scales, orthogonal, np.random.default_rng(101)),
         scaled_pair(256, cols, scales, orthogonal, np.random.default_rng(202)),
-        eps_list,
         seeds,
     )
     for n_latent, q_seed in ((4, 45), (6, 47), (8, 49)):
         graded, _ = np.linalg.qr(np.random.default_rng(q_seed).standard_normal((cols, cols)))
-        graded_scales = latent_scales(cols, n_latent)
         run_case(
             f"{n_latent} 个潜变量，尺度从 8 逐级减半，其余 0.05。正交阵种子 {q_seed}，校准 111，评估 222。",
             weight,
-            scaled_pair(256, cols, graded_scales, graded, np.random.default_rng(111)),
-            scaled_pair(256, cols, graded_scales, graded, np.random.default_rng(222)),
-            eps_list,
+            scaled_pair(256, cols, latent_scales(cols, n_latent), graded, np.random.default_rng(111)),
+            scaled_pair(256, cols, latent_scales(cols, n_latent), graded, np.random.default_rng(222)),
             seeds,
         )
     return 0
