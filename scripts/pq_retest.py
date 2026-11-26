@@ -248,6 +248,14 @@ def main() -> int:
             scaled_pair(256, cols, latent_scales(cols, n_latent), graded, np.random.default_rng(222)),
             seeds,
         )
+    graded, _ = np.linalg.qr(np.random.default_rng(49).standard_normal((cols, cols)))
+    run_case(
+        "8 个潜变量再跑 20 个种子。五种子那组的块白化标准差最大，领先只有标准差之和的 1.4 倍。",
+        weight,
+        scaled_pair(256, cols, latent_scales(cols, 8), graded, np.random.default_rng(111)),
+        scaled_pair(256, cols, latent_scales(cols, 8), graded, np.random.default_rng(222)),
+        range(20),
+    )
     return 0
 
 
