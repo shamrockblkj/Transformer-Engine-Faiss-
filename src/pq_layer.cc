@@ -483,6 +483,58 @@ Matrix block_correlated_activation(int tokens, int cols, std::mt19937* rng) {
     return x;
 }
 
+void random_orthogonal_n(std::mt19937* rng, int n, std::vector<double>* q) {
+    q->assign(static_cast<size_t>(n) * n, 0.0);
+    std::normal_distribution<double> normal(0.0, 1.0);
+    auto at = [&](int row, int col) -> double& { return (*q)[static_cast<size_t>(row) * n + col]; };
+    for (int col = 0; col < n; ++col) {
+        for (int row = 0; row < n; ++row) {
+            at(row, col) = normal(*rng);
+        }
+        for (int prev = 0; prev < col; ++prev) {
+            double dot = 0.0;
+            for (int row = 0; row < n; ++row) {
+                dot += at(row, col) * at(row, prev);
+            }
+            for (int row = 0; row < n; ++row) {
+                at(row, col) -= dot * at(row, prev);
+            }
+        }
+        double norm = 0.0;
+        for (int row = 0; row < n; ++row) {
+            norm += at(row, col) * at(row, col);
+        }
+        norm = std::sqrt(std::max(norm, 1e-30));
+        for (int row = 0; row < n; ++row) {
+            at(row, col) /= norm;
+        }
+    }
+}
+
+Matrix cross_block_activation(int tokens, int cols, std::mt19937* rng) {
+    // 反向对照。只留一个大的潜变量，其余坐标很小，再左乘一个 64 维全局正交阵。
+    // 十六个同样大的潜变量混开后，量化残差的交叉项会抵消。各向同性噪声再旋转，Σ 仍接近单位阵。
+    std::vector<double> q;
+    random_orthogonal_n(rng, cols, &q);
+    Matrix x = make_matrix(tokens, cols);
+    std::normal_distribution<double> unit(0.0, 1.0);
+    std::vector<double> latent(static_cast<size_t>(cols));
+    for (int t = 0; t < tokens; ++t) {
+        for (int c = 0; c < cols; ++c) {
+            const double scale = (c == 0) ? 8.0 : 0.05;
+            latent[static_cast<size_t>(c)] = scale * unit(*rng);
+        }
+        for (int row = 0; row < cols; ++row) {
+            double value = 0.0;
+            for (int col = 0; col < cols; ++col) {
+                value += q[static_cast<size_t>(row) * cols + col] * latent[static_cast<size_t>(col)];
+            }
+            x.at(t, row) = value;
+        }
+    }
+    return x;
+}
+
 struct WhitenCheck {
     double roundtrip = 0.0;
     double direction = 0.0;
@@ -892,6 +944,50 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "块内相关时两条路径的交叉项占比没有分开，问题在脚本或 pq_layer\n");
         return 1;
     }
-    std::printf("阳性对照成立：块内相关时，子空间白化优于对角白化，交叉项占比也分开了。\n");
+    std::printf("阳性对照成立：块内相关时，子空间白化优于对角白化。\n");
+    std::printf("阳性对照的块与块独立。交叉项占比的差别多半是 32 条样本的噪声被更大的误差放大，不是跨块结构。\n");
+
+    std::mt19937 cross_rng(31);
+    const Matrix crossed = cross_block_activation(kTokens, kCols, &cross_rng);
+    {
+        const int tokens = crossed.rows;
+        const int cols = crossed.cols;
+        std::vector<double> sigma(static_cast<size_t>(cols) * cols, 0.0);
+        for (int t = 0; t < tokens; ++t) {
+            for (int a = 0; a < cols; ++a) {
+                for (int b = 0; b < cols; ++b) {
+                    sigma[static_cast<size_t>(a) * cols + b] += crossed.at(t, a) * crossed.at(t, b);
+                }
+            }
+        }
+        double total = 0.0;
+        double within = 0.0;
+        for (int a = 0; a < cols; ++a) {
+            for (int b = 0; b < cols; ++b) {
+                const double value = sigma[static_cast<size_t>(a) * cols + b] / tokens;
+                const double sq = value * value;
+                total += sq;
+                if (a / kDsub == b / kDsub) {
+                    within += sq;
+                }
+            }
+        }
+        Matrix zero = make_matrix(weight.rows, weight.cols);
+        Report plain;
+        fill_error_split(weight, zero, crossed, &plain);
+        const double plain_share = plain.cross_mse / std::max(std::fabs(plain.within_mse + plain.cross_mse), 1e-30);
+        std::printf("反向对照的 Σ：跨块能量 %.1f%%。不量化时，用原权重算出的交叉项占比 %.1f%%。\n",
+                    100.0 * (total - within) / total, 100.0 * plain_share);
+    }
+    const Report cross_white = run_case(weight, crossed, false, true, kCentroids, false);
+    const double cross_share = cross_white.cross_mse / std::max(std::fabs(cross_white.output_mse), 1e-30);
+    std::printf("反向对照：一个大潜变量、其余坐标很小，再乘一个全局正交阵。样本内，n=%d。\n", kTokens);
+    std::printf("%-16s %14.4f %14.4f\n", "子空间白化", cross_white.weight_rel_small, cross_white.output_mse);
+    print_split("反向对照 子空间白化", cross_white);
+    if (!(std::fabs(cross_share) > std::fabs(white_cross) + 0.10)) {
+        std::fprintf(stderr, "全局混合后块白化的交叉项占比没有明显变大，这项诊断还不能用来决定子空间大小\n");
+        return 1;
+    }
+    std::printf("反向对照成立：有跨块结构时，块白化的交叉项占比明显大于块间独立的阳性对照。\n");
     return 0;
 }
