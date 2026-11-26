@@ -474,6 +474,13 @@ def select_eps(Ws, Sfit, Sval, cfg):
     return cfg.eps_grid[i], i in (0, len(cfg.eps_grid) - 1), curve
 
 
+def r_path_note(n_scan):
+    """只有一档时看不出 r 有没有下降过，不归类。"""
+    if n_scan < 2:
+        return "仅一档，不归类"
+    return None
+
+
 def scan_label(n_scan, mult, mmax):
     """扫描只有一档时不判收敛。多档里顶在最大档，记成未收敛。"""
     if n_scan < 2:
@@ -613,7 +620,11 @@ def analyze_position(cal, ev, Ws, cfg, excl):
     out["scan"] = {str(k): v for k, v in scan.items()}
     out["final"] = scan[mmax]
     # 归类用全部档的 r，含 mse_tol、已通过的档和最大档。不能只看 r_mismatch 标签。
+    # 只有一档时，例如 --mult 1 的 1:r，判断不了有没有下降过，不归类。
     out["r_by_mult"] = {str(m): int(scan[m]["r"]) for m in mults}
+    note = r_path_note(len(mults))
+    if note:
+        out["r_path"] = note
 
     # 校准倍数：最小的 n，使 (lowrank: r 与最大档相同) 且每个权重
     #   相对最大档的 MSE 增幅 ≤ cal_tol_rel，或配对差值 ≤ cal_tol_se 个标准误
@@ -689,6 +700,8 @@ def print_report(name, res):
     shown = {k: v["label"] for k, v in res["min_cal_mult"].items()}
     fails = {k: v["fail"] for k, v in res["min_cal_mult"].items() if v.get("fail")}
     rseq = " ".join(f"{m}:{r}" for m, r in res["r_by_mult"].items())
+    if res.get("r_path"):
+        rseq = f"{rseq} ({res['r_path']})"
     print(f"最小校准倍数 {shown}  失败档 {fails}  r 序列 {rseq}   判定 {res['verdict']}")
 
 
@@ -753,6 +766,8 @@ def selftest(args):
         raise AssertionError(f"配对 z 口径不对：平局 {tie['z']}，单种子 {one['z']}，恒定领先 {strict['z']}")
     if scan_label(1, 1, 1) != (None, "1 (仅一档，不判收敛)"):
         raise AssertionError(f"单档扫描不该判收敛：{scan_label(1, 1, 1)}")
+    if r_path_note(1) != "仅一档，不归类" or r_path_note(5) is not None:
+        raise AssertionError(f"单档 r 序列不该归类：{r_path_note(1)} / {r_path_note(5)}")
     if scan_label(5, 16, 16) != (False, ">=16 (未收敛)") or scan_label(5, 2, 16) != (True, "2"):
         raise AssertionError("多档收敛标签不对")
     spike_selftest(args.spike_thr, args.spike_topk)
