@@ -833,6 +833,98 @@ double off_block_energy(const Matrix& act) {
     return (total - within) / total;
 }
 
+void moment_basis(const Matrix& act, std::vector<double>* vectors, std::vector<double>* eval) {
+    std::vector<double> sigma;
+    double trace = 0.0;
+    symmetrize_moment(act, &sigma, &trace);
+    std::vector<double> raw_vectors;
+    std::vector<double> raw_eval;
+    jacobi_eigen_n(&sigma, act.cols, &raw_vectors, &raw_eval);
+    std::vector<int> order(static_cast<size_t>(act.cols));
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return raw_eval[static_cast<size_t>(a)] > raw_eval[static_cast<size_t>(b)]; });
+    vectors->assign(static_cast<size_t>(act.cols) * act.cols, 0.0);
+    eval->resize(static_cast<size_t>(act.cols));
+    for (int i = 0; i < act.cols; ++i) {
+        (*eval)[static_cast<size_t>(i)] = raw_eval[static_cast<size_t>(order[static_cast<size_t>(i)])];
+        for (int k = 0; k < act.cols; ++k) {
+            (*vectors)[static_cast<size_t>(k) * act.cols + i] =
+                raw_vectors[static_cast<size_t>(k) * act.cols + order[static_cast<size_t>(i)]];
+        }
+    }
+}
+
+struct SubspaceSplit {
+    double strong = 0.0;
+    double weak = 0.0;
+    double cross = 0.0;
+    double weak_residual = 0.0;
+};
+
+SubspaceSplit split_subspace(const Matrix& weight, const Matrix& recon, const Matrix& act, const std::vector<double>& vectors, int keep) {
+    const int cols = weight.cols;
+    std::vector<double> act_coeff(static_cast<size_t>(act.rows) * cols, 0.0);
+    for (int t = 0; t < act.rows; ++t) {
+        for (int i = 0; i < cols; ++i) {
+            double along = 0.0;
+            for (int c = 0; c < cols; ++c) {
+                along += act.at(t, c) * vectors[static_cast<size_t>(c) * cols + i];
+            }
+            act_coeff[static_cast<size_t>(t) * cols + i] = along;
+        }
+    }
+    std::vector<double> residual_coeff(static_cast<size_t>(weight.rows) * cols, 0.0);
+    SubspaceSplit out;
+    for (int r = 0; r < weight.rows; ++r) {
+        for (int i = 0; i < cols; ++i) {
+            double along = 0.0;
+            for (int c = 0; c < cols; ++c) {
+                along += (weight.at(r, c) - recon.at(r, c)) * vectors[static_cast<size_t>(c) * cols + i];
+            }
+            residual_coeff[static_cast<size_t>(r) * cols + i] = along;
+            if (i >= keep) {
+                out.weak_residual += along * along;
+            }
+        }
+    }
+    out.weak_residual /= weight.rows;
+    for (int t = 0; t < act.rows; ++t) {
+        for (int r = 0; r < weight.rows; ++r) {
+            double strong = 0.0;
+            double weak = 0.0;
+            for (int i = 0; i < keep; ++i) {
+                strong += residual_coeff[static_cast<size_t>(r) * cols + i] * act_coeff[static_cast<size_t>(t) * cols + i];
+            }
+            for (int i = keep; i < cols; ++i) {
+                weak += residual_coeff[static_cast<size_t>(r) * cols + i] * act_coeff[static_cast<size_t>(t) * cols + i];
+            }
+            out.strong += strong * strong;
+            out.weak += weak * weak;
+            out.cross += 2.0 * strong * weak;
+        }
+    }
+    const double denom = static_cast<double>(act.rows) * weight.rows;
+    out.strong /= denom;
+    out.weak /= denom;
+    out.cross /= denom;
+    return out;
+}
+
+double weak_moment(const Matrix& act, const std::vector<double>& vectors, int keep) {
+    const int cols = act.cols;
+    double total = 0.0;
+    for (int t = 0; t < act.rows; ++t) {
+        for (int i = keep; i < cols; ++i) {
+            double along = 0.0;
+            for (int c = 0; c < cols; ++c) {
+                along += act.at(t, c) * vectors[static_cast<size_t>(c) * cols + i];
+            }
+            total += along * along;
+        }
+    }
+    return total / act.rows;
+}
+
 double top_energy_share(const Matrix& act, int keep) {
     std::vector<double> sigma;
     double trace = 0.0;
@@ -1416,6 +1508,50 @@ int main(int argc, char** argv) {
     std::printf("，");
     print_mean_std("完整白化", full_in, kSeedCount);
     std::printf("。标准差按 5 个种子、除以 4。\n");
+    std::vector<double> basis_vectors;
+    std::vector<double> basis_eval;
+    moment_basis(calib, &basis_vectors, &basis_eval);
+    const double calib_weak_moment = weak_moment(calib, basis_vectors, 1);
+    const double eval_weak_moment = weak_moment(eval_act, basis_vectors, 1);
+    double block_in_part[3] = {};
+    double block_out_part[3] = {};
+    double full_in_part[3] = {};
+    double full_out_part[3] = {};
+    double block_residual = 0.0;
+    double full_residual = 0.0;
+    for (int i = 0; i < kSeedCount; ++i) {
+        const SubspaceSplit block_on_calib = split_subspace(weight, block_recons[i], calib, basis_vectors, 1);
+        const SubspaceSplit block_on_eval = split_subspace(weight, block_recons[i], eval_act, basis_vectors, 1);
+        const Matrix full_recon = full_whiten_recon(weight, calib, kCentroids, seeds[i], 8);
+        const SubspaceSplit full_on_calib = split_subspace(weight, full_recon, calib, basis_vectors, 1);
+        const SubspaceSplit full_on_eval = split_subspace(weight, full_recon, eval_act, basis_vectors, 1);
+        const SubspaceSplit parts[4] = {block_on_calib, block_on_eval, full_on_calib, full_on_eval};
+        double* dest[4] = {block_in_part, block_out_part, full_in_part, full_out_part};
+        for (int p = 0; p < 4; ++p) {
+            dest[p][0] += parts[p].strong;
+            dest[p][1] += parts[p].weak;
+            dest[p][2] += parts[p].cross;
+        }
+        block_residual += block_on_calib.weak_residual;
+        full_residual += full_on_calib.weak_residual;
+    }
+    for (double* part : {block_in_part, block_out_part, full_in_part, full_out_part}) {
+        for (int k = 0; k < 3; ++k) {
+            part[k] /= kSeedCount;
+        }
+    }
+    std::printf("秩 1，按校准集最大特征向量拆开。弱方向是其余 63 维。\n");
+    std::printf("  块白化 样本内 主方向 %.4f 弱方向 %.4f 交叉 %.4f\n", block_in_part[0], block_in_part[1], block_in_part[2]);
+    std::printf("  块白化 样本外 主方向 %.4f 弱方向 %.4f 交叉 %.4f\n", block_out_part[0], block_out_part[1], block_out_part[2]);
+    std::printf("  完整白化 样本内 主方向 %.4f 弱方向 %.4f 交叉 %.4f\n", full_in_part[0], full_in_part[1], full_in_part[2]);
+    std::printf("  完整白化 样本外 主方向 %.4f 弱方向 %.4f 交叉 %.4f\n", full_out_part[0], full_out_part[1], full_out_part[2]);
+    std::printf("  完整白化样本外减样本内：主方向 %+.4f，弱方向 %+.4f，交叉 %+.4f。\n", full_out_part[0] - full_in_part[0],
+                full_out_part[1] - full_in_part[1], full_out_part[2] - full_in_part[2]);
+    std::printf("  块白化样本外减样本内：主方向 %+.4f，弱方向 %+.4f，交叉 %+.4f。\n", block_out_part[0] - block_in_part[0],
+                block_out_part[1] - block_in_part[1], block_out_part[2] - block_in_part[2]);
+    std::printf("  校准集在弱方向上的能量 %.4f，评估集 %.4f，比值 %.3f。\n", calib_weak_moment, eval_weak_moment,
+                eval_weak_moment / std::max(calib_weak_moment, 1e-30));
+    std::printf("  残差在弱方向上的均方：块白化 %.4f，完整白化 %.4f。\n", block_residual / kSeedCount, full_residual / kSeedCount);
     const double eps_scan[] = {1e-4, 1e-3, 1e-2, 1e-1};
     std::printf("秩 1，扫描 ε，样本外完整白化：\n");
     for (double eps_rel : eps_scan) {
@@ -1461,6 +1597,17 @@ int main(int argc, char** argv) {
         std::mt19937 mid_eval_rng(222);
         fill_scaled_activation(&mid_calib, mid_q, scales, &mid_calib_rng);
         fill_scaled_activation(&mid_eval, mid_q, scales, &mid_eval_rng);
+        std::vector<double> mid_vectors;
+        std::vector<double> mid_eval_values;
+        moment_basis(mid_calib, &mid_vectors, &mid_eval_values);
+        const double mid_calib_weak = weak_moment(mid_calib, mid_vectors, n_latent);
+        const double mid_eval_weak = weak_moment(mid_eval, mid_vectors, n_latent);
+        double mid_full_in_part[3] = {};
+        double mid_full_out_part[3] = {};
+        double mid_block_in_part[3] = {};
+        double mid_block_out_part[3] = {};
+        double mid_block_residual = 0.0;
+        double mid_full_residual = 0.0;
         double mid_block_eval[kSeedCount];
         double mid_block_in[kSeedCount];
         double mid_full_eval[kSeedCount];
@@ -1473,6 +1620,24 @@ int main(int argc, char** argv) {
             mid_block_in[i] = held_out_mse(weight, mid_block, mid_calib);
             mid_full_eval[i] = held_out_mse(weight, mid_full, mid_eval);
             mid_full_in[i] = held_out_mse(weight, mid_full, mid_calib);
+            const SubspaceSplit block_on_calib = split_subspace(weight, mid_block, mid_calib, mid_vectors, n_latent);
+            const SubspaceSplit block_on_eval = split_subspace(weight, mid_block, mid_eval, mid_vectors, n_latent);
+            const SubspaceSplit full_on_calib = split_subspace(weight, mid_full, mid_calib, mid_vectors, n_latent);
+            const SubspaceSplit full_on_eval = split_subspace(weight, mid_full, mid_eval, mid_vectors, n_latent);
+            const SubspaceSplit parts[4] = {block_on_calib, block_on_eval, full_on_calib, full_on_eval};
+            double* dest[4] = {mid_block_in_part, mid_block_out_part, mid_full_in_part, mid_full_out_part};
+            for (int p = 0; p < 4; ++p) {
+                dest[p][0] += parts[p].strong;
+                dest[p][1] += parts[p].weak;
+                dest[p][2] += parts[p].cross;
+            }
+            mid_block_residual += block_on_calib.weak_residual;
+            mid_full_residual += full_on_calib.weak_residual;
+        }
+        for (double* part : {mid_block_in_part, mid_block_out_part, mid_full_in_part, mid_full_out_part}) {
+            for (int k = 0; k < 3; ++k) {
+                part[k] /= kSeedCount;
+            }
         }
         std::printf("中间情形：%d 个潜变量，尺度从 8 逐级减半，其余 0.05，再全局旋转。跨块能量 %.3f，前 %d 个特征值占迹的 %.1f%%，条件度量平均 %.3f。\n",
                     n_latent, off_block_energy(mid_calib), n_latent, 100.0 * top_energy_share(mid_calib, n_latent),
@@ -1486,6 +1651,15 @@ int main(int argc, char** argv) {
         std::printf("，");
         print_mean_std("完整白化", mid_full_in, kSeedCount);
         std::printf("。\n");
+        std::printf("  前 %d 个特征向量之外：完整白化样本外减样本内 主方向 %+.4f 弱方向 %+.4f 交叉 %+.4f。\n", n_latent,
+                    mid_full_out_part[0] - mid_full_in_part[0], mid_full_out_part[1] - mid_full_in_part[1],
+                    mid_full_out_part[2] - mid_full_in_part[2]);
+        std::printf("  块白化样本外减样本内 主方向 %+.4f 弱方向 %+.4f 交叉 %+.4f。\n",
+                    mid_block_out_part[0] - mid_block_in_part[0], mid_block_out_part[1] - mid_block_in_part[1],
+                    mid_block_out_part[2] - mid_block_in_part[2]);
+        std::printf("  弱方向能量 校准 %.4f 评估 %.4f 比值 %.3f。残差均方 块白化 %.4f 完整白化 %.4f。\n", mid_calib_weak,
+                    mid_eval_weak, mid_eval_weak / std::max(mid_calib_weak, 1e-30), mid_block_residual / kSeedCount,
+                    mid_full_residual / kSeedCount);
     }
     std::mt19937 many_rng(31);
     const Matrix many = cross_block_activation(kTokens, kCols, &many_rng, false);
