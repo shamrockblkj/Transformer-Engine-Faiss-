@@ -533,8 +533,10 @@ def analyze_position(cal, ev, Ws, cfg, excl):
         if final:
             # 配对判定；不足 3 个标准误时加种子。rho 的贡献改按全部种子平均。
             ent["paired_lowrank_vs_block"] = {}
+            used_seeds = {}
             for nm, W in Ws.items():
                 pr = paired(ent["mse"][nm]["block"], ent["mse"][nm]["lowrank"])
+                used_seeds[nm] = list(seeds)
                 if abs(pr["z"]) < 3 and len(seeds) < cfg.seeds_ext:
                     n_old, n_new = len(seeds), cfg.seeds_ext
                     contrib_per_w[nm] *= n_old / n_new
@@ -545,18 +547,20 @@ def analyze_position(cal, ev, Ws, cfg, excl):
                             ent["small_row_err"][nm][p].append(small_row_err(W, Wh))
                             if p == "lowrank":
                                 contrib_per_w[nm] += (((Wh - W) @ V) ** 2).sum(0) * q / n_new
+                    used_seeds[nm] = list(range(n_new))
                     pr = paired(ent["mse"][nm]["block"], ent["mse"][nm]["lowrank"])
                     pr["extended"] = True
                 ent["paired_lowrank_vs_block"][nm] = pr
-            # r 扫描
+            # r 扫描。种子和这张权重的配对判定相同：加到 20 个才用 20 个。
             rs = sorted({max(1, L.r // 2), L.r, 2 * L.r, 4 * L.r} & set(range(1, d + 1))) or [1]
             ent["r_scan"] = {}
             for nm, W in Ws.items():
-                base = ent["mse"][nm]["lowrank"][:len(seeds)]
+                ws_ = used_seeds[nm]
+                base = ent["mse"][nm]["lowrank"][:len(ws_)]
                 rows = []
                 for r in rs:
                     Lr = LowRank(wn, Vn, eps, r)
-                    m_ = [mse_S(W, recon("lowrank", W, {"lowrank": Lr}, s, cfg), Se) for s in seeds]
+                    m_ = [mse_S(W, recon("lowrank", W, {"lowrank": Lr}, s, cfg), Se) for s in ws_]
                     rows.append(dict(r=r, **ms(m_), vs_r_eff=paired(base, m_)))
                 ent["r_scan"][nm] = rows
             # rho：各权重按残差能量相加，不是等权。种子加过之后，上面已按全部种子重新平均。
