@@ -48,28 +48,43 @@ POSITIONS = {   # 名称: (挂 hook 的模块, 共用这个 Σ 的权重)
 
 # ======================= 采样：流式二阶矩 =======================
 class Accum:
-    """流式累加 Σ xxᵀ 与 Σ x，在指定 token 数处存快照；另存每条序列首 token（用于 excl 口径）。"""
-    def __init__(self, d, snap_tokens, zeros, to_np):
+    """流式累加 Σ xxᵀ 与 Σ x，在指定 token 数处存快照；另存每条序列首 token（用于 excl 口径）。
+    精度：每 chunk 个 token 在 FP32 里算 bᵀb，再加到 FP64 总和上。总和与快照仍是 FP64。
+    输入是 bf16 激活，转 FP32 无损；chunk 内求和的相对误差约 chunk·2⁻²⁴。"""
+    def __init__(self, d, snap_tokens, zeros, to_np, chunk=512):
         self.S, self.m = zeros((d, d)), zeros((d,))
         self.n, self.snaps = 0, sorted({int(t) for t in snap_tokens})
         self.out, self.first_idx, self.first_vec, self.to_np = {}, [], [], to_np
+        self.chunk = int(chunk)
         self.spikes = []
 
     @property
     def done(self):
         return self.n >= self.snaps[-1]
 
-    def add_seq(self, x):                       # x: (T, d)，float64
+    @staticmethod
+    def _f32(b):
+        return b.float() if hasattr(b, "float") and not isinstance(b, np.ndarray) else np.asarray(b, np.float32)
+
+    @staticmethod
+    def _f64(b):
+        return b.double() if hasattr(b, "double") and not isinstance(b, np.ndarray) else np.asarray(b, np.float64)
+
+    def add_seq(self, x):                       # x: (T, d)，任意浮点类型（torch 或 numpy）
         if self.done or len(x) == 0:
             return
         self.first_idx.append(self.n)
-        self.first_vec.append(np.asarray(self.to_np(x[0]), np.float64))
+        self.first_vec.append(np.asarray(self.to_np(self._f64(x[0])), np.float64))
         i = 0
         while i < len(x) and not self.done:
             nxt = next(t for t in self.snaps if t > self.n)
             j = min(len(x), i + nxt - self.n)
-            b = x[i:j]
-            self.S += b.T @ b; self.m += b.sum(0); self.n += j - i; i = j
+            for c in range(i, j, self.chunk):   # 快照边界内再按 chunk 分块
+                b = self._f32(x[c:min(j, c + self.chunk)])
+                self.S += self._f64(b.T @ b)
+                self.m += self._f64(b.sum(0))
+            self.n += j - i
+            i = j
             if self.n == nxt:
                 self.out[nxt] = (np.array(self.to_np(self.S)), np.array(self.to_np(self.m)))
 
@@ -212,7 +227,8 @@ def make_resid_hook(slot, layer_idx):
 
 
 def make_proj_hook(acc, slot):
-    """投影输入只记 peak。这个位置通常已过 RMSNorm，不能用它判断尖峰在不在。Σ 仍用 float64 累加。"""
+    """投影输入只记 peak。这个位置通常已过 RMSNorm，不能用它判断尖峰在不在。
+    激活交给 Accum，由它转成 FP32 分块累加，再加进 FP64 总和。"""
     import torch
 
     def hook(_module, inputs, acc=acc, slot=slot):
@@ -222,7 +238,7 @@ def make_proj_hook(acc, slot):
         xf = values.float()
         rms = torch.sqrt(torch.mean(xf * xf, dim=-1)).clamp_min(1e-8)
         slot["peak"] = (torch.amax(torch.abs(xf), dim=-1) / rms).cpu().numpy()
-        acc.add_seq(values.double())
+        acc.add_seq(values)
     return hook
 
 
@@ -230,6 +246,7 @@ def collect(args):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.model)
+    torch.backends.cuda.matmul.allow_tf32 = False      # Σ 累加必须是真 FP32，不能走 TF32（10 位尾数）
     if tok.bos_token_id is None:
         raise RuntimeError("这个分词器没有 bos_token_id。pos 0 必须是 BOS，不能用 EOS 顶上。")
     model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.bfloat16,
@@ -278,7 +295,7 @@ def collect(args):
             for pos in args.positions:
                 mod = get_mod(layers[l], POSITIONS[pos][0])
                 d = mod.in_features
-                acc = Accum(d, [m * d for m in mults], zeros, to_np)
+                acc = Accum(d, [m * d for m in mults], zeros, to_np, chunk=args.accum_chunk)
                 slot = {}
                 accs[(l, pos)] = acc
                 slots[(l, pos)] = slot
@@ -535,7 +552,10 @@ def analyze_position(cal, ev, Ws, cfg, excl):
         final = mult == mmax
         paths = ("raw", "block", "diag", "lowrank") if final else ("block", "lowrank")
         if final:
-            weak = w < cfg.weak_tau * w.max()
+            # 弱方向：低于 weak_tau·λmax，但高于 FP32 累加的数值底（floor_rel·λmax）。底下的方向不可测，不进 rho。
+            floor = cfg.floor_rel * w.max()
+            weak = (w < cfg.weak_tau * w.max()) & (w > floor)
+            n_below_floor = int((w <= floor).sum())
             q = (V * (Se @ V)).sum(0)
             contrib_per_w = {nm: np.zeros(d) for nm in Ws}
             ent["small_row_err"] = {}
@@ -613,7 +633,8 @@ def analyze_position(cal, ev, Ws, cfg, excl):
             rho = q / np.maximum(w, 1e-300)
             if weak.any():
                 cw = contrib[weak]
-                ent["rho"] = dict(n_weak=int(weak.sum()), median=float(np.median(rho[weak])),
+                ent["rho"] = dict(n_weak=int(weak.sum()), n_below_floor=n_below_floor,
+                                  median=float(np.median(rho[weak])),
                                   max=float(rho[weak].max()),
                                   weighted=float((cw * rho[weak]).sum() / max(cw.sum(), 1e-300)))
         scan[mult] = ent
@@ -688,7 +709,8 @@ def print_report(name, res):
     print(f"低秩: ε={f['eps']:g}{' (端点!)' if f['at_edge'] else ''}  r={f['r']}  "
           f"cond={f['cond']:.3g}  尾部能量 {f['tail_energy']:.4f}")
     if "rho" in f:
-        print(f"rho: 中位 {f['rho']['median']:.3f}  最大 {f['rho']['max']:.3f}  加权 {f['rho']['weighted']:.3f}")
+        print(f"rho: 中位 {f['rho']['median']:.3f}  最大 {f['rho']['max']:.3f}  加权 {f['rho']['weighted']:.3f}  "
+              f"(弱方向 {f['rho']['n_weak']}，低于数值底 {f['rho']['n_below_floor']})")
     for nm in f["mse"]:
         row = "  ".join(f"{p} {np.mean(v):.4g}±{np.std(v, ddof=1):.2g}" for p, v in f["mse"][nm].items())
         pr = f["paired_lowrank_vs_block"][nm]
@@ -734,7 +756,8 @@ def make_cfg(args):
         seeds=range(args.seeds), seeds_ext=args.seeds_ext, select_seeds=range(args.select_seeds),
         min_seeds=getattr(args, "min_seeds", 5),
         r_ext_band=tuple(getattr(args, "r_ext_band", (1.0, 6.0))),
-        weak_tau=1e-3, cal_tol_rel=args.cal_tol_rel, cal_tol_se=args.cal_tol_se,
+        weak_tau=1e-3, floor_rel=getattr(args, "floor_rel", 1e-5),
+        cal_tol_rel=args.cal_tol_rel, cal_tol_se=args.cal_tol_se,
         first_modes=[{"incl": False, "excl": True}[m] for m in args.first_token])
 
 # ======================= 自测 =======================
@@ -804,6 +827,7 @@ def main(argv=None):
     c.add_argument("--layers", type=int, nargs="+", default=[1, 15])
     c.add_argument("--positions", nargs="+", default=["mlp_in"], choices=list(POSITIONS))
     c.add_argument("--mult", type=int, default=16, help="校准/评估 token 数 = mult × d")
+    c.add_argument("--accum-chunk", type=int, default=512, help="FP32 分块累加的 token 数")
     c.add_argument("--seq-len", type=int, default=1024); c.add_argument("--min-len", type=int, default=64)
     c.add_argument("--device", default="cuda")
     c.add_argument("--spike-thr", type=float, default=10)
@@ -813,6 +837,8 @@ def main(argv=None):
             p.add_argument("--stats", required=True)
         p.add_argument("--d-sub", type=int, default=4); p.add_argument("--k", type=int, default=256)
         p.add_argument("--niter", type=int, default=15)
+        p.add_argument("--floor-rel", type=float, default=1e-5,
+                       help="rho 只统计 λ > floor_rel·λmax 的弱方向；更低的方向处于 FP32 累加的数值底")
         p.add_argument("--cal-tol-rel", type=float, default=0.01, help="校准倍数判据：相对最大档 MSE 增幅上限")
         p.add_argument("--cal-tol-se", type=float, default=2.0, help="校准倍数判据：配对标准误倍数上限")
         p.add_argument("--seeds", type=int, default=5); p.add_argument("--seeds-ext", type=int, default=20)
