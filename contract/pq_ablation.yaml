@@ -297,6 +297,7 @@ retest:
 llama_retest:
   script: scripts/llama3_retest.py
   status: 脚本已入库。numpy 自测跑通。collect 需要 torch、transformers 和权重，这里没跑。第一次只跑一层，层号就是 model.layers 的下标。
+  smoke: contract/smoke_8b.md
   first_run: python3 scripts/llama3_retest.py collect --model /路径/Meta-Llama-3-8B --cal cal.jsonl --eval eval.jsonl --layers 1 --positions attn_in o_in mlp_in --out runs/ && python3 scripts/llama3_retest.py analyze --stats runs/ --d-sub 4 --k 256 --seeds 2 --select-seeds 1
   numpy_selftest:
     data: d=64，5 个大方向加重尾，一个离群通道，首 token 放大 20 倍。k=8，numpy k-means，不加载模型。
