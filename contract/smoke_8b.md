@@ -18,9 +18,20 @@
 
 仓库里没有这两步的命令文本，按测量侧自己的流程执行。然后再确认这台机器能看见 GPU，并且已经放好 Meta-Llama-3-8B 权重。
 
-## 命令
+## 语料
 
-校准集和评估集按文档切开，互不重叠。每行一个 `{"text": ...}`。
+来源按 `contract/pq_ablation.yaml` 的 `llama_retest.corpus`，不是另造的：
+
+- 校准 `cal.jsonl`：C4 **训练集**里互不重叠的文档。
+- 评估 `eval.jsonl`：WikiText-2 **训练集**里互不重叠的文档。
+- 不用 WikiText-2 的 test，也不用日后要报 C4 困惑度的那一份验证划分。
+- 切分以文档 / 序列为单位，不在 token 级别随机切开。每行一个 `{"text": ...}`。
+
+`--mult 1`、序列长 1024 时，校准和评估各约 4096 条 token，大约各要 4 条完整序列。多备几篇，坏序列丢掉之后仍凑满。不要半截序列去补。
+
+主机上若已有这两份原始语料，直接切成 jsonl。若没有，用 Hugging Face 上的官方划分装到本机后再切：C4 训练集、`wikitext` 的 `wikitext-2-raw-v1` 训练集。这是合同点名的语料，不是另拉一份。
+
+## 命令
 
 ```bash
 python3 scripts/llama3_retest.py collect \
@@ -33,7 +44,7 @@ python3 scripts/llama3_retest.py analyze \
     --stats smoke/ --seeds 2 --select-seeds 1
 ```
 
-`--layers 15` 是 `model.layers` 的下标，也就是第 16 层。`--mult 1` 时校准和评估各约 4096 条 token。请记下 `collect` 和 `analyze` 各自的墙钟时间，后面只优化最慢的那一段。
+`--layers 15` 是 `model.layers` 的下标，也就是第 16 层。请记下 `collect` 和 `analyze` 各自的墙钟时间，后面只优化最慢的那一段。
 
 ## 回传
 
