@@ -1,0 +1,23 @@
+# Frozen pins for official V2.8 4090 24GB install (from VERSION_LOCK.md).
+# Use with pip --constraint. The SOLVER constraint used by setup_env.sh
+# must OMIT nvidia-cudnn-cu12 because torch 2.8.0+cu128 metadata requires
+# nvidia-cudnn-cu12==9.10.2.21. After install, assert pkg==9.28.1.4 and
+# torch.backends.cudnn.version() >= 91200.
+torch==2.8.0
+huggingface_hub==2.4.0
+huggingface-hub==2.4.0
+nvidia-cudnn-cu12==9.28.1.4
+nvidia-cublas-cu12==12.8.4.1
+transformers==5.24.1
+accelerate==1.16.0
+datasets==5.2.0
+lm-eval==0.4.13
+tokenizers==0.23.3
+safetensors==0.8.0
+sentencepiece==0.2.3
+einops==0.8.2
+peft==0.22.0
+faiss-cpu==1.16.0
+transformer-engine==2.21.0
+transformer-engine-cu12==2.21.0
+transformer-engine-torch==2.21.0

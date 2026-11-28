@@ -1,0 +1,9 @@
+# Deterministic ASCII corpus for Gate 0 prefill/decode timing.
+# This text is original and short; the measurement script repeats tokens to the requested length.
+# It is a protocol fixture, not a measured result.
+
+The measurement protocol uses a fixed prompt body so that prefill and decode lengths can be reproduced.
+The model checkpoint, tokenizer, batch size, and sampling settings are recorded in the run log.
+Warm-up runs are discarded. Timed runs report the median and the spread, including P50 and P95 latency.
+Prefill and decode are measured separately. Decode starts at batch size one.
+This paragraph is repeated by the harness until the token length matches the protocol.
