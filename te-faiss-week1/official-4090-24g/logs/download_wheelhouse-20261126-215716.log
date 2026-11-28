@@ -1,0 +1,349 @@
+[wheelhouse] 开始：20261126-215716（Asia/Shanghai）
+[wheelhouse] 目标目录：/workspace/te-faiss-week1/official-4090-24g/wheelhouse
+[wheelhouse] 日志：/workspace/te-faiss-week1/official-4090-24g/logs/download_wheelhouse-20261126-215716.log
+pip 25.1.1 from /usr/lib/python3/dist-packages/pip (python 3.13)
+[wheelhouse] 已存在 torch-2.8.0+cu128，跳过重下。
+[wheelhouse] 下载（二进制 --no-deps，cp312）：huggingface_hub==2.4.0
+Collecting huggingface_hub==2.4.0
+  Using cached huggingface_hub-2.4.0-py3-none-any.whl.metadata (16 kB)
+Downloading huggingface_hub-2.4.0-py3-none-any.whl (857 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 857.0/857.0 kB 26.4 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/huggingface_hub-2.4.0-py3-none-any.whl
+Successfully downloaded huggingface_hub
+[wheelhouse] 下载（二进制 --no-deps，cp312）：nvidia-cudnn-cu12==9.28.1.4
+Collecting nvidia-cudnn-cu12==9.28.1.4
+  Using cached nvidia_cudnn_cu12-9.28.1.4-py3-none-manylinux_2_27_x86_64.whl.metadata (1.9 kB)
+Downloading nvidia_cudnn_cu12-9.28.1.4-py3-none-manylinux_2_27_x86_64.whl (716.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 716.6/716.6 MB 122.8 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/nvidia_cudnn_cu12-9.28.1.4-py3-none-manylinux_2_27_x86_64.whl
+Successfully downloaded nvidia-cudnn-cu12
+[wheelhouse] 下载（二进制 --no-deps，cp312）：faiss-cpu==1.16.0
+Collecting faiss-cpu==1.16.0
+  Using cached faiss_cpu-1.16.0-cp310-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (7.8 kB)
+Downloading faiss_cpu-1.16.0-cp310-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (19.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 19.5/19.5 MB 174.9 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/faiss_cpu-1.16.0-cp310-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+Successfully downloaded faiss-cpu
+[wheelhouse] 下载（二进制 --no-deps，cp312）：transformers==5.24.1
+Collecting transformers==5.24.1
+  Using cached transformers-5.24.1-py3-none-any.whl.metadata (31 kB)
+Downloading transformers-5.24.1-py3-none-any.whl (13.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 13.6/13.6 MB 134.0 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/transformers-5.24.1-py3-none-any.whl
+Successfully downloaded transformers
+[wheelhouse] 下载（二进制 --no-deps，cp312）：accelerate==1.16.0
+Collecting accelerate==1.16.0
+  Using cached accelerate-1.16.0-py3-none-any.whl.metadata (19 kB)
+Downloading accelerate-1.16.0-py3-none-any.whl (389 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/accelerate-1.16.0-py3-none-any.whl
+Successfully downloaded accelerate
+[wheelhouse] 下载（二进制 --no-deps，cp312）：datasets==5.2.0
+Collecting datasets==5.2.0
+  Using cached datasets-5.2.0-py3-none-any.whl.metadata (24 kB)
+Downloading datasets-5.2.0-py3-none-any.whl (608 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 608.3/608.3 kB 24.8 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/datasets-5.2.0-py3-none-any.whl
+Successfully downloaded datasets
+[wheelhouse] 下载（二进制 --no-deps，cp312）：lm-eval==0.4.13
+Collecting lm-eval==0.4.13
+  Using cached lm_eval-0.4.13-py3-none-any.whl.metadata (64 kB)
+Downloading lm_eval-0.4.13-py3-none-any.whl (9.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 9.1/9.1 MB 22.6 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/lm_eval-0.4.13-py3-none-any.whl
+Successfully downloaded lm-eval
+[wheelhouse] 下载（二进制 --no-deps，cp312）：tokenizers==0.23.3
+Collecting tokenizers==0.23.3
+  Using cached tokenizers-0.23.3-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (9.8 kB)
+Downloading tokenizers-0.23.3-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (3.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.4/3.4 MB 73.4 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/tokenizers-0.23.3-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+Successfully downloaded tokenizers
+[wheelhouse] 下载（二进制 --no-deps，cp312）：safetensors==0.8.0
+Collecting safetensors==0.8.0
+  Using cached safetensors-0.8.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.2 kB)
+Downloading safetensors-0.8.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (516 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/safetensors-0.8.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+Successfully downloaded safetensors
+[wheelhouse] 下载（二进制 --no-deps，cp312）：sentencepiece==0.2.3
+Collecting sentencepiece==0.2.3
+  Using cached sentencepiece-0.2.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (34 kB)
+Downloading sentencepiece-0.2.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (1.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.7/1.7 MB 52.0 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/sentencepiece-0.2.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+Successfully downloaded sentencepiece
+[wheelhouse] 下载（二进制 --no-deps，cp312）：peft==0.22.0
+Collecting peft==0.22.0
+  Using cached peft-0.22.0-py3-none-any.whl.metadata (15 kB)
+Downloading peft-0.22.0-py3-none-any.whl (886 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 886.7/886.7 kB 33.3 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/peft-0.22.0-py3-none-any.whl
+Successfully downloaded peft
+[wheelhouse] 下载（二进制 --no-deps，cp312）：einops==0.8.2
+Collecting einops==0.8.2
+  Using cached einops-0.8.2-py3-none-any.whl.metadata (13 kB)
+Downloading einops-0.8.2-py3-none-any.whl (65 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/einops-0.8.2-py3-none-any.whl
+Successfully downloaded einops
+[wheelhouse] 下载（二进制 --no-deps，cp312）：ninja
+Collecting ninja
+  Using cached ninja-1.13.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.4 kB)
+Downloading ninja-1.13.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (183 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/ninja-1.13.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+Successfully downloaded ninja
+[wheelhouse] 下载（二进制 --no-deps，cp312）：cmake
+Collecting cmake
+  Using cached cmake-4.4.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (7.0 kB)
+Downloading cmake-4.4.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (30.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 30.2/30.2 MB 186.2 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/cmake-4.4.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+Successfully downloaded cmake
+[wheelhouse] 下载（二进制 --no-deps，cp312）：pybind11
+Collecting pybind11
+  Using cached pybind11-3.1.0-py3-none-any.whl.metadata (10 kB)
+Downloading pybind11-3.1.0-py3-none-any.whl (319 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/pybind11-3.1.0-py3-none-any.whl
+Successfully downloaded pybind11
+[wheelhouse] 下载（二进制 --no-deps，cp312）：packaging
+Collecting packaging
+  Using cached packaging-26.4-py3-none-any.whl.metadata (3.5 kB)
+Downloading packaging-26.4-py3-none-any.whl (140 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/packaging-26.4-py3-none-any.whl
+Successfully downloaded packaging
+[wheelhouse] 下载（二进制 --no-deps，cp312）：pydantic
+Collecting pydantic
+  Using cached pydantic-2.14.4-py3-none-any.whl.metadata (143 kB)
+Downloading pydantic-2.14.4-py3-none-any.whl (494 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/pydantic-2.14.4-py3-none-any.whl
+Successfully downloaded pydantic
+[wheelhouse] 下载（二进制 --no-deps，cp312）：importlib-metadata
+Collecting importlib-metadata
+  Using cached importlib_metadata-10.2.0-py3-none-any.whl.metadata (4.6 kB)
+Downloading importlib_metadata-10.2.0-py3-none-any.whl (34 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/importlib_metadata-10.2.0-py3-none-any.whl
+Successfully downloaded importlib-metadata
+[wheelhouse] 下载（二进制 --no-deps，cp312）：psutil
+Collecting psutil
+  Using cached psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl.metadata (22 kB)
+Downloading psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl (155 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl
+Successfully downloaded psutil
+[wheelhouse] 下载（二进制 --no-deps，cp312）：pyyaml
+Collecting pyyaml
+  Using cached pyyaml-6.0.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.3 kB)
+Downloading pyyaml-6.0.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (849 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 849.2/849.2 kB 29.0 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/pyyaml-6.0.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+Successfully downloaded pyyaml
+[wheelhouse] 下载（二进制 --no-deps，cp312）：tqdm
+Collecting tqdm
+  Using cached tqdm-4.70.1-py3-none-any.whl.metadata (57 kB)
+Downloading tqdm-4.70.1-py3-none-any.whl (80 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/tqdm-4.70.1-py3-none-any.whl
+Successfully downloaded tqdm
+[wheelhouse] 下载（二进制 --no-deps，cp312）：numpy
+Collecting numpy
+  Using cached numpy-2.5.5-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (6.6 kB)
+Downloading numpy-2.5.5-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (15.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 15.7/15.7 MB 181.9 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/numpy-2.5.5-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+Successfully downloaded numpy
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：transformer-engine==2.21.0
+Collecting transformer-engine==2.21.0
+  Downloading transformer_engine-2.21.0-py3-none-any.whl.metadata (7.4 kB)
+Downloading transformer_engine-2.21.0-py3-none-any.whl (1.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 36.4 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/transformer_engine-2.21.0-py3-none-any.whl
+Successfully downloaded transformer-engine
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：transformer-engine-cu12==2.21.0
+Collecting transformer-engine-cu12==2.21.0
+  Downloading transformer_engine_cu12-2.21.0-py3-none-manylinux_2_28_x86_64.whl.metadata (7.2 kB)
+Downloading transformer_engine_cu12-2.21.0-py3-none-manylinux_2_28_x86_64.whl (681.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 681.8/681.8 MB 24.8 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/transformer_engine_cu12-2.21.0-py3-none-manylinux_2_28_x86_64.whl
+Successfully downloaded transformer-engine-cu12
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：transformer-engine-torch==2.21.0
+Collecting transformer-engine-torch==2.21.0
+  Downloading transformer_engine_torch-2.21.0.tar.gz (520 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/transformer_engine_torch-2.21.0.tar.gz
+Successfully downloaded transformer-engine-torch
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：nvidia-cudnn-frontend>=1.29.0
+Collecting nvidia-cudnn-frontend>=1.29.0
+  Downloading nvidia_cudnn_frontend-1.33.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (20 kB)
+Downloading nvidia_cudnn_frontend-1.33.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (28.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 28.4/28.4 MB 164.2 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/nvidia_cudnn_frontend-1.33.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+Successfully downloaded nvidia-cudnn-frontend
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：nvdlfw-inspect
+Collecting nvdlfw-inspect
+  Downloading nvdlfw_inspect-0.2.2-py3-none-any.whl.metadata (5.2 kB)
+Downloading nvdlfw_inspect-0.2.2-py3-none-any.whl (30 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/nvdlfw_inspect-0.2.2-py3-none-any.whl
+Successfully downloaded nvdlfw-inspect
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：onnxscript
+Collecting onnxscript
+  Downloading onnxscript-0.7.2-py3-none-any.whl.metadata (13 kB)
+Downloading onnxscript-0.7.2-py3-none-any.whl (754 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 754.2/754.2 kB 14.3 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/onnxscript-0.7.2-py3-none-any.whl
+Successfully downloaded onnxscript
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：onnx
+Collecting onnx
+  Downloading onnx-1.23.2-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (8.7 kB)
+Downloading onnx-1.23.2-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (8.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 8.9/8.9 MB 134.4 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/onnx-1.23.2-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+Successfully downloaded onnx
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：sqlitedict
+Collecting sqlitedict
+  Downloading sqlitedict-2.1.0.tar.gz (21 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/sqlitedict-2.1.0.tar.gz
+Successfully downloaded sqlitedict
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：evaluate>=0.4.0
+Collecting evaluate>=0.4.0
+  Using cached evaluate-0.4.6-py3-none-any.whl.metadata (9.5 kB)
+Downloading evaluate-0.4.6-py3-none-any.whl (84 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/evaluate-0.4.6-py3-none-any.whl
+Successfully downloaded evaluate
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：rouge-score>=0.0.4
+Collecting rouge-score>=0.0.4
+  Downloading rouge_score-0.1.2.tar.gz (17 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/rouge_score-0.1.2.tar.gz
+Successfully downloaded rouge-score
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：sacrebleu>=1.5.0
+Collecting sacrebleu>=1.5.0
+  Using cached sacrebleu-2.6.0-py3-none-any.whl.metadata (39 kB)
+Downloading sacrebleu-2.6.0-py3-none-any.whl (100 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/sacrebleu-2.6.0-py3-none-any.whl
+Successfully downloaded sacrebleu
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：scikit-learn>=0.24.1
+Collecting scikit-learn>=0.24.1
+  Using cached scikit_learn-1.9.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (9.3 kB)
+Downloading scikit_learn-1.9.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (9.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 9.2/9.2 MB 130.4 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/scikit_learn-1.9.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+Successfully downloaded scikit-learn
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：pytablewriter
+Collecting pytablewriter
+  Using cached pytablewriter-1.2.1-py3-none-any.whl.metadata (38 kB)
+Downloading pytablewriter-1.2.1-py3-none-any.whl (91 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/pytablewriter-1.2.1-py3-none-any.whl
+Successfully downloaded pytablewriter
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：dill
+Collecting dill
+  Using cached dill-0.4.1-py3-none-any.whl.metadata (10 kB)
+Downloading dill-0.4.1-py3-none-any.whl (120 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/dill-0.4.1-py3-none-any.whl
+Successfully downloaded dill
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：pandas
+Collecting pandas
+  Using cached pandas-3.1.1-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (16 kB)
+Downloading pandas-3.1.1-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (12.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 12.0/12.0 MB 155.1 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/pandas-3.1.1-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
+Successfully downloaded pandas
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：pyarrow
+Collecting pyarrow
+  Using cached pyarrow-26.0.1-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (3.0 kB)
+Downloading pyarrow-26.0.1-cp312-cp312-manylinux_2_28_x86_64.whl (55.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 55.0/55.0 MB 203.7 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/pyarrow-26.0.1-cp312-cp312-manylinux_2_28_x86_64.whl
+Successfully downloaded pyarrow
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：xxhash
+Collecting xxhash
+  Using cached xxhash-4.1.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (18 kB)
+Downloading xxhash-4.1.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (472 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/xxhash-4.1.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+Successfully downloaded xxhash
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：multiprocess
+Collecting multiprocess
+  Using cached multiprocess-0.70.19-py312-none-any.whl.metadata (7.5 kB)
+Downloading multiprocess-0.70.19-py312-none-any.whl (150 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/multiprocess-0.70.19-py312-none-any.whl
+Successfully downloaded multiprocess
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：regex
+Collecting regex
+  Using cached regex-2026.11.25-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (40 kB)
+Downloading regex-2026.11.25-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (820 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 820.5/820.5 kB 29.5 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/regex-2026.11.25-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+Successfully downloaded regex
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：typer
+Collecting typer
+  Using cached typer-0.29.3-py3-none-any.whl.metadata (16 kB)
+Downloading typer-0.29.3-py3-none-any.whl (121 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/typer-0.29.3-py3-none-any.whl
+Successfully downloaded typer
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：httpx2>=2.0.0
+Collecting httpx2>=2.0.0
+  Using cached httpx2-2.16.2-py3-none-any.whl.metadata (10.0 kB)
+Downloading httpx2-2.16.2-py3-none-any.whl (97 kB)
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/httpx2-2.16.2-py3-none-any.whl
+Successfully downloaded httpx2
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：hf_xet
+Collecting hf_xet
+  Using cached hf_xet-1.8.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (4.9 kB)
+Downloading hf_xet-1.8.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (4.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.3/4.3 MB 107.3 MB/s eta 0:00:00
+
+Saved ./te-faiss-week1/official-4090-24g/wheelhouse/hf_xet-1.8.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+Successfully downloaded hf_xet
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：filelock
+Collecting filelock
+  File was already downloaded /workspace/te-faiss-week1/official-4090-24g/wheelhouse/filelock-4.3.1-py3-none-any.whl
+Successfully downloaded filelock
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：fsspec
+Collecting fsspec
+  File was already downloaded /workspace/te-faiss-week1/official-4090-24g/wheelhouse/fsspec-2026.9.0-py3-none-any.whl
+Successfully downloaded fsspec
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：jinja2
+Collecting jinja2
+  File was already downloaded /workspace/te-faiss-week1/official-4090-24g/wheelhouse/jinja2-3.1.6-py3-none-any.whl
+Successfully downloaded jinja2
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：markupsafe
+Collecting markupsafe
+  File was already downloaded /workspace/te-faiss-week1/official-4090-24g/wheelhouse/markupsafe-3.0.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+Successfully downloaded markupsafe
+[wheelhouse] 下载（允许 sdist，--no-deps，Python 3.12）：typing_extensions
+Collecting typing_extensions
+  File was already downloaded /workspace/te-faiss-week1/official-4090-24g/wheelhouse/typing_extensions-4.16.0-py3-none-any.whl
+Successfully downloaded typing_extensions
+[wheelhouse] 错误：wheelhouse 出现禁止缓存的包，已停止。请删除后重跑：transformer_engine_torch-2.21.0.tar.gz

@@ -1,0 +1,98 @@
+{
+  "default_configs": [
+    "bf16",
+    "te_fp8"
+  ],
+  "configs": {
+    "bf16": {
+      "enabled_by_default": true,
+      "status": "默认可跑",
+      "precision": "bf16",
+      "teacher": true,
+      "requires_packages": [],
+      "notes": "同源 BF16 教师，质量与性能上限参照。"
+    },
+    "fp16": {
+      "enabled_by_default": false,
+      "status": "可选（无需额外量化包）",
+      "precision": "fp16",
+      "teacher": false,
+      "requires_packages": [],
+      "notes": "与 BF16 分列，不互相替代教师。需显式 --configs 才跑。"
+    },
+    "te_fp8": {
+      "enabled_by_default": true,
+      "status": "默认可跑",
+      "precision": "te_fp8_delayed_scaling",
+      "teacher": false,
+      "requires_packages": [
+        "transformer_engine"
+      ],
+      "notes": "逐张量 DelayedScaling。必须记录是否真正走到 FP8 kernel，禁止静默回退当已测 FP8。"
+    },
+    "awq_4bit": {
+      "enabled_by_default": false,
+      "status": "本轮环境默认未装，待另批",
+      "requires_packages": [
+        "autoawq"
+      ],
+      "notes": "计划 W1 / A3：AWQ 4-bit。词表 BF16 与词表 1 字节两种口径需分列。不得在本脚本中 pip install。"
+    },
+    "gptq_4bit_vocab_bf16": {
+      "enabled_by_default": false,
+      "status": "本轮环境默认未装，待另批",
+      "requires_packages": [
+        "gptqmodel"
+      ],
+      "notes": "GPTQ 4-bit，词表保持 BF16。禁止安装 gptqmodel 7.12.2 及要求 torch>=2.14 的版本。"
+    },
+    "gptq_4bit_vocab_1byte": {
+      "enabled_by_default": false,
+      "status": "本轮环境默认未装，待另批",
+      "requires_packages": [
+        "gptqmodel"
+      ],
+      "notes": "GPTQ 4-bit，词表 1 字节口径。与词表 BF16 分列，不得混报。"
+    },
+    "gguf_q4_k_m": {
+      "enabled_by_default": false,
+      "status": "本轮环境默认未装，待另批",
+      "requires_packages": [
+        "llama_cpp"
+      ],
+      "notes": "GGUF Q4_K_M。第二轮另选包并验证不会升级 PyTorch。"
+    },
+    "gguf_lower_bit": {
+      "enabled_by_default": false,
+      "status": "本轮环境默认未装，待另批",
+      "requires_packages": [
+        "llama_cpp"
+      ],
+      "notes": "更低比特代表（如 Q3_K 或 IQ 系列），代表尚未另批选定。"
+    },
+    "aqlm_1x16": {
+      "enabled_by_default": false,
+      "status": "本轮环境默认未装，待另批",
+      "requires_packages": [
+        "aqlm"
+      ],
+      "notes": "AQLM 1×16。日后加测须注明权重来源、实现和评测版本。"
+    },
+    "aqlm_2x8": {
+      "enabled_by_default": false,
+      "status": "本轮环境默认未装，待另批",
+      "requires_packages": [
+        "aqlm"
+      ],
+      "notes": "AQLM 2×8（LUT 查表路线对照）。计划要求必须做，但本轮默认未装。"
+    },
+    "attn_w4_ffn_original": {
+      "enabled_by_default": false,
+      "status": "本轮环境默认未装，待另批",
+      "requires_packages": [
+        "autoawq"
+      ],
+      "notes": "注意力 W4（AWQ/GPTQ 逐组）+ FFN 保持原方案。"
+    }
+  }
+}

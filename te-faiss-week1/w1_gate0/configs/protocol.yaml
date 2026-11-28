@@ -1,0 +1,128 @@
+# Gate 0 可复现测量协议（脚本默认）。
+# 权威口径以 ../../eval_protocol.md 与 ../VERSION_LOCK.md 为准。
+# 撰写日期：2026-11-26（Asia/Shanghai）。
+# 本文件里的数字不是已测结果。质量种子、性能主表与吞吐采样已按 eval_protocol.md
+# （开发总管 2026-11-26 冻结）写死：seed=0；B=1、L=2048、decode=256；temperature=0 / 关闭 top_p。
+
+schema_version: 1
+written: "2026-11-26"
+timezone: "Asia/Shanghai"
+protocol_doc: "../../eval_protocol.md"
+version_lock: "../../VERSION_LOCK.md"
+
+model:
+  path: "/data/models/Meta-Llama-3-8B"
+  expected:
+    model_type: llama
+    hidden_size: 4096
+    intermediate_size: 14336
+    num_hidden_layers: 32
+    num_attention_heads: 32
+    num_key_value_heads: 8
+    head_dim: 128
+    vocab_size: 128256
+  exclude_subdir: "original"
+  local_files_only: true
+  trust_remote_code: false
+
+hardware:
+  required_name_substr: "4090"
+  required_name_must_contain_rtx: true
+  required_compute_capability: [8, 9]
+  # Official GeForce RTX 4090 24GB class. Typical nvidia-smi reading is ~24564 MiB;
+  # the actual value comes from the new host. Accept 24000-25000 MiB only.
+  expected_memory_mib: 24564
+  min_memory_mib: 24000
+  max_memory_mib: 25000
+  # Modified 48G historical record was 49140 MiB. Anything in the >=40000 MiB class fails.
+  reject_memory_mib_at_least: 40000
+  require_single_gpu: true
+  require_driver_exact: false
+  reject_name_regex: "(?i)(tesla\\s*p4|\\bP4\\b|4090\\s*D)"
+  conda_env: "torch2.8_cuda12.8"
+  forbidden_conda_env: "torch2.14_cuda13.0"
+  cuda_home: "/usr/local/cuda-12.8"
+  hf_endpoint: "https://hf-mirror.com"
+
+# 与 VERSION_LOCK.md 第 2、3 节一致；偏离则失败退出。
+versions:
+  python: "3.12.0"
+  torch: "2.8.0+cu128"
+  torch_cuda: "12.8"
+  driver: "待实测"  # 旧 48G 主机曾为 580.159.03，新机不作为硬门槛
+  huggingface_hub: "2.4.0"
+  nvidia_cudnn_cu12: "9.28.1.4"
+  transformer_engine: "2.21.0"
+  transformers: "5.24.1"
+  accelerate: "1.16.0"
+  datasets: "5.2.0"
+  lm_eval: "0.4.13"
+  tokenizers: "0.23.3"
+  safetensors: "0.8.0"
+
+measurement:
+  warmup_runs: 3
+  timed_runs: 3
+  decode_batch_size: 1
+  # 主形状：eval_protocol.md 第 5.1 节 / V2.6 L=2048。
+  primary_prefill_length: 2048
+  # 已冻结（eval_protocol.md 第 5.1 节，开发总管 2026-11-26）：decode 生成步数 256。
+  decode_new_tokens: 256
+  decode_new_tokens_frozen: true
+  # A7 可选补充表，不替代主表。
+  supplemental_prefill_lengths: [512, 8192]
+  supplemental_decode_prompt_lengths: [128]
+  sampling:
+    do_sample: false
+    temperature: 0.0
+    top_p: null
+    top_k: null
+    frozen: true   # eval_protocol.md 第 5.2 节，开发总管 2026-11-26 冻结
+  seed: 0
+  seed_frozen: true  # eval_protocol.md 第 4.5 节，开发总管 2026-11-26 冻结
+
+quality:
+  ppl_primary_metric: "word_perplexity"
+  ppl_secondary_metrics: ["byte_perplexity", "bits_per_byte"]
+  # 不另切未说明的滚动窗口；跟随 lm-eval / 模型默认最大上下文，并记录实际 max_length。
+  ppl_custom_max_length: null
+  wikitext:
+    lm_eval_task: "wikitext"
+    dataset_path: "EleutherAI/wikitext_document_level"
+    dataset_name: "wikitext-2-raw-v1"
+    split: "test"
+    num_fewshot: 0
+  c4:
+    lm_eval_task: "c4"
+    dataset_path: "allenai/c4"
+    dataset_name: "en"
+    split: "validation"
+    num_fewshot: 0
+    official_shards_only: true
+  mmlu:
+    lm_eval_task: "mmlu"
+    num_fewshot: 5
+    metric: "acc"
+    subgroups: ["mmlu_stem", "mmlu_humanities", "mmlu_social_sciences", "mmlu_other"]
+    forbidden_substitutes: ["mmlu_continuation", "mmlu_generative"]
+  target_task:
+    status: "待补"
+  quality_runs: 3
+  batch_size: 1
+
+te_fp8:
+  recipe_name: "DelayedScaling"
+  scaling: "per-tensor"
+  # 官方 DelayedScaling 默认值（TE 2.21.0 Common API，查阅于 2026-11-26）：
+  # https://docs.nvidia.com/deeplearning/transformer-engine/api/common.html
+  # https://docs.nvidia.com/deeplearning/transformer-engine/features/low_precision_training/fp8_delayed_scaling/fp8_delayed_scaling.html
+  recipe:
+    margin: 0
+    amax_history_len: 1024
+    amax_compute_algo: "max"
+    fp8_format: "HYBRID"
+  use_block_scaling: false
+  # 本路径把 nn.Linear 换成 te.Linear，并在 te.autocast 下前向。
+  # 与官方 tutorial 整层替换 TE.TransformerLayer 不完全相同，须在报告中注明。
+  convert_nn_linear: true
+  replace_full_decoder_layer: false
